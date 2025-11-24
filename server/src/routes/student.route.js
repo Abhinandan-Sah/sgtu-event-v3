@@ -35,4 +35,57 @@ router.get('/my-school-stalls', studentController.getMySchoolStalls);
 router.post('/submit-school-ranking', studentController.submitSchoolRanking);
 router.get('/my-submitted-rank', studentController.getMySchoolRanking);
 
+// ============================================================
+// EVENT DISCOVERY AND REGISTRATION ROUTES (Multi-Event Support)
+// ============================================================
+
+/**
+ * @route   GET /api/student/events
+ * @desc    Get available events (free and paid)
+ * @access  Private (STUDENT)
+ */
+router.get('/events', studentController.getAvailableEvents);
+
+/**
+ * @route   GET /api/student/events/:eventId
+ * @desc    Get single event details
+ * @access  Private (STUDENT)
+ */
+router.get('/events/:eventId', studentController.getEventDetails);
+
+/**
+ * @route   POST /api/student/events/:eventId/register
+ * @desc    Register for free event
+ * @access  Private (STUDENT)
+ */
+router.post('/events/:eventId/register', studentController.registerForFreeEvent);
+
+/**
+ * @route   POST /api/student/events/:eventId/payment/initiate
+ * @desc    Initiate payment for paid event
+ * @access  Private (STUDENT)
+ */
+router.post('/events/:eventId/payment/initiate', studentController.initiatePaidEventPayment);
+
+/**
+ * @route   POST /api/student/events/:eventId/payment/verify
+ * @desc    Verify payment and complete registration
+ * @access  Private (STUDENT)
+ */
+router.post('/events/:eventId/payment/verify', studentController.verifyPayment);
+
+/**
+ * @route   GET /api/student/my-events
+ * @desc    Get student's registered events
+ * @access  Private (STUDENT)
+ */
+router.get('/my-events', studentController.getMyRegisteredEvents);
+
+/**
+ * @route   POST /api/student/events/:eventId/payment/webhook
+ * @desc    Razorpay payment webhook
+ * @access  Public (Razorpay callback)
+ */
+// Note: Webhook route should be handled separately with signature verification
+
 export default router;

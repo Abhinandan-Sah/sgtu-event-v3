@@ -1,10 +1,11 @@
 import rateLimit from 'express-rate-limit';
-import RedisStore from 'rate-limit-redis';
-import { redisClient } from '../config/redis.js';
+// import RedisStore from 'rate-limit-redis';
+// import { redisClient } from '../config/redis.js';
 
 /**
  * Rate Limiting Middleware
  * Prevents API abuse and DDoS attacks
+ * Note: Using in-memory store. For production with multiple servers, use Redis store.
  */
 
 /**
@@ -20,12 +21,8 @@ export const apiLimiter = rateLimit({
     retryAfter: '15 minutes'
   },
   standardHeaders: true, // Return rate limit info in `RateLimit-*` headers
-  legacyHeaders: false, // Disable `X-RateLimit-*` headers
-  // Use Redis store if available
-  store: redisClient ? new RedisStore({
-    client: redisClient,
-    prefix: 'rl:api:'
-  }) : undefined
+  legacyHeaders: false // Disable `X-RateLimit-*` headers
+  // Note: Using in-memory store (default). For production with multiple servers, configure Redis store.
 });
 
 /**
@@ -42,11 +39,8 @@ export const authLimiter = rateLimit({
   },
   skipSuccessfulRequests: true, // Don't count successful requests
   standardHeaders: true,
-  legacyHeaders: false,
-  store: redisClient ? new RedisStore({
-    client: redisClient,
-    prefix: 'rl:auth:'
-  }) : undefined
+  legacyHeaders: false
+  // Note: Using in-memory store (default). For production with multiple servers, configure Redis store.
 });
 
 /**
@@ -62,11 +56,7 @@ export const qrLimiter = rateLimit({
     retryAfter: '1 minute'
   },
   standardHeaders: true,
-  legacyHeaders: false,
-  store: redisClient ? new RedisStore({
-    client: redisClient,
-    prefix: 'rl:qr:'
-  }) : undefined
+  legacyHeaders: false
 });
 
 /**
@@ -82,11 +72,7 @@ export const registrationLimiter = rateLimit({
     retryAfter: '1 hour'
   },
   standardHeaders: true,
-  legacyHeaders: false,
-  store: redisClient ? new RedisStore({
-    client: redisClient,
-    prefix: 'rl:register:'
-  }) : undefined
+  legacyHeaders: false
 });
 
 /**
@@ -102,11 +88,7 @@ export const feedbackLimiter = rateLimit({
     retryAfter: '1 hour'
   },
   standardHeaders: true,
-  legacyHeaders: false,
-  store: redisClient ? new RedisStore({
-    client: redisClient,
-    prefix: 'rl:feedback:'
-  }) : undefined
+  legacyHeaders: false
 });
 
 export default {

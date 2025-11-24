@@ -10,6 +10,7 @@ import stallRoutes from './stall.route.js';
 import feedbackRoutes from './feedback.route.js';
 import rankingRoutes from './ranking.route.js';
 import checkInOutRoutes from './checkInOut.route.js';
+import eventManagerRoutes from './eventManager.route.js';
 
 export {
   adminRoutes,
@@ -18,5 +19,6 @@ export {
   stallRoutes,
   feedbackRoutes,
   rankingRoutes,
-  checkInOutRoutes
+  checkInOutRoutes,
+  eventManagerRoutes
 };

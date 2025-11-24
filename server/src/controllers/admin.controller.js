@@ -3,6 +3,8 @@ import Student from '../models/Student.model.js';
 import Volunteer from '../models/Volunteer.model.js';
 import Stall from '../models/Stall.model.js';
 import CheckInOut from '../models/CheckInOut.model.js';
+import EventManagerModel from '../models/EventManager.model.js'; // ✅ Fixed: consistent naming
+import EventModel from '../models/Event.model.js'; // ✅ Fixed: consistent naming
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 import { successResponse, errorResponse } from '../helpers/response.js';
@@ -368,6 +370,504 @@ const getTopStalls = async (req, res, next) => {
   }
 };
 
+// ============================================================
+// EVENT MANAGER & EVENT APPROVAL OPERATIONS (Multi-Event)
+// ============================================================
+
+/**
+ * Create a new event manager (Admin only)
+ * @route POST /api/admin/event-managers
+ */
+const createEventManager = async (req, res, next) => {
+  try {
+    let { full_name, email, password, phone, organization } = req.body;
+    const adminId = req.user.id;
+
+    // Validation
+    if (!full_name || !email || !password || !phone) {
+      return errorResponse(res, 'Full name, email, password, and phone are required', 400);
+    }
+
+    // Sanitize full_name to prevent XSS
+    full_name = full_name.trim().replace(/<[^>]*>/g, '');
+    if (full_name.length === 0) {
+      return errorResponse(res, 'Full name cannot be empty or contain only HTML tags', 400);
+    }
+
+    // Sanitize organization if provided
+    if (organization) {
+      organization = organization.trim().replace(/<[^>]*>/g, '');
+    }
+
+    // Validate phone number (10 digits)
+    const phoneRegex = /^\d{10}$/;
+    if (!phoneRegex.test(phone)) {
+      return errorResponse(res, 'Phone number must be exactly 10 digits', 400);
+    }
+
+    // Validate email format
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!emailRegex.test(email)) {
+      return errorResponse(res, 'Invalid email format', 400);
+    }
+
+    // Validate password strength
+    if (password.length < 6) {
+      return errorResponse(res, 'Password must be at least 6 characters long', 400);
+    }
+
+    // Check if email already exists
+    const existingManager = await query(
+      'SELECT id FROM event_managers WHERE email = $1',
+      [email]
+    );
+    if (existingManager.length > 0) {
+      return errorResponse(res, 'Email already registered', 400);
+    }
+
+    // Hash password
+    const hashedPassword = await bcrypt.hash(password, 10);
+
+    // Create event manager (pre-approved by admin)
+    const result = await query(
+      `INSERT INTO event_managers 
+       (full_name, email, password_hash, phone, organization, 
+        is_approved_by_admin, approved_by_admin_id, approved_at, is_active)
+       VALUES ($1, $2, $3, $4, $5, true, $6, NOW(), true)
+       RETURNING id, full_name, email, phone, organization, 
+                 is_approved_by_admin, is_active, created_at, approved_at`,
+      [full_name, email, hashedPassword, phone, organization || null, adminId]
+    );
+
+    return successResponse(res, {
+      event_manager: result[0]
+    }, 'Event manager created successfully', 201);
+  } catch (error) {
+    next(error);
+  }
+};
+
+/**
+ * Get details of a specific event manager
+ * @route GET /api/admin/event-managers/:id
+ */
+const getEventManagerDetails = async (req, res, next) => {
+  try {
+    const { id } = req.params;
+
+    const result = await query(
+      `SELECT 
+        em.id,
+        em.full_name,
+        em.email,
+        em.phone,
+        em.organization,
+        em.is_approved_by_admin,
+        em.is_active,
+        em.created_at,
+        em.approved_at,
+        em.total_events_created,
+        em.total_events_completed,
+        a.full_name as approved_by_name,
+        COUNT(e.id) as total_events,
+        SUM(CASE WHEN e.status = 'ACTIVE' THEN 1 ELSE 0 END) as active_events
+      FROM event_managers em
+      LEFT JOIN events e ON em.id = e.created_by_manager_id
+      LEFT JOIN admins a ON em.approved_by_admin_id = a.id
+      WHERE em.id = $1
+      GROUP BY em.id, a.full_name`,
+      [id]
+    );
+
+    if (result.length === 0) {
+      return errorResponse(res, 'Event manager not found', 404);
+    }
+
+    return successResponse(res, {
+      event_manager: result[0]
+    }, 'Event manager details retrieved successfully');
+  } catch (error) {
+    next(error);
+  }
+};
+
+/**
+ * Update event manager details
+ * @route PUT /api/admin/event-managers/:id
+ */
+const updateEventManager = async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    const { full_name, email, phone, organization, password } = req.body;
+
+    // Check if manager exists
+    const existing = await query(
+      'SELECT id FROM event_managers WHERE id = $1',
+      [id]
+    );
+    if (existing.length === 0) {
+      return errorResponse(res, 'Event manager not found', 404);
+    }
+
+    // Check if new email is already taken by another manager
+    if (email) {
+      const emailCheck = await query(
+        'SELECT id FROM event_managers WHERE email = $1 AND id != $2',
+        [email, id]
+      );
+      if (emailCheck.length > 0) {
+        return errorResponse(res, 'Email already in use by another manager', 400);
+      }
+    }
+
+    // Build dynamic update query
+    const updates = [];
+    const values = [];
+    let paramCount = 1;
+
+    if (full_name) {
+      updates.push(`full_name = $${paramCount++}`);
+      values.push(full_name);
+    }
+    if (email) {
+      updates.push(`email = $${paramCount++}`);
+      values.push(email);
+    }
+    if (phone) {
+      updates.push(`phone = $${paramCount++}`);
+      values.push(phone);
+    }
+    if (organization !== undefined) {
+      updates.push(`organization = $${paramCount++}`);
+      values.push(organization);
+    }
+    if (password) {
+      const hashedPassword = await bcrypt.hash(password, 10);
+      updates.push(`password_hash = $${paramCount++}`);
+      values.push(hashedPassword);
+    }
+
+    if (updates.length === 0) {
+      return errorResponse(res, 'No fields to update', 400);
+    }
+
+    values.push(id);
+    const result = await query(
+      `UPDATE event_managers 
+       SET ${updates.join(', ')}
+       WHERE id = $${paramCount}
+       RETURNING id, full_name, email, phone, organization, 
+                 is_approved_by_admin, is_active, created_at, approved_at`,
+      values
+    );
+
+    return successResponse(res, {
+      event_manager: result[0]
+    }, 'Event manager updated successfully');
+  } catch (error) {
+    next(error);
+  }
+};
+
+/**
+ * Delete event manager
+ * @route DELETE /api/admin/event-managers/:id
+ */
+const deleteEventManager = async (req, res, next) => {
+  try {
+    const { id } = req.params;
+
+    // Check if manager has any active events
+    const activeEvents = await query(
+      `SELECT COUNT(*) as count 
+       FROM events 
+       WHERE created_by_manager_id = $1 
+         AND status = 'ACTIVE'`,
+      [id]
+    );
+
+    if (parseInt(activeEvents[0].count) > 0) {
+      return errorResponse(
+        res,
+        'Cannot delete event manager with active events. Please deactivate or reassign events first.',
+        400
+      );
+    }
+
+    // Delete the event manager
+    const result = await query(
+      'DELETE FROM event_managers WHERE id = $1 RETURNING id',
+      [id]
+    );
+
+    if (result.length === 0) {
+      return errorResponse(res, 'Event manager not found', 404);
+    }
+
+    return successResponse(res, {
+      deleted_id: id
+    }, 'Event manager deleted successfully');
+  } catch (error) {
+    next(error);
+  }
+};
+
+/**
+ * Get all event managers
+ * @route GET /api/admin/event-managers
+ */
+const getAllEventManagers = async (req, res, next) => {
+  try {
+    const result = await query(`
+      SELECT 
+        em.id,
+        em.full_name,
+        em.email,
+        em.phone,
+        em.organization,
+        em.is_approved_by_admin,
+        em.is_active,
+        em.created_at,
+        em.approved_at,
+        em.total_events_created,
+        em.total_events_completed,
+        COUNT(e.id) as current_events,
+        SUM(CASE WHEN e.status = 'ACTIVE' THEN 1 ELSE 0 END) as active_events,
+        a.full_name as approved_by_name
+      FROM event_managers em
+      LEFT JOIN events e ON em.id = e.created_by_manager_id
+      LEFT JOIN admins a ON em.approved_by_admin_id = a.id
+      GROUP BY em.id, a.full_name
+      ORDER BY em.created_at DESC
+    `);
+
+    return successResponse(res, {
+      event_managers: result,
+      total: result.length
+    }, 'Event managers retrieved successfully');
+  } catch (error) {
+    next(error);
+  }
+};
+
+// ============================================================
+// EVENT APPROVAL MANAGEMENT
+// ============================================================
+
+/**
+ * Get all pending event approval requests
+ * @route GET /api/admin/events/pending
+ */
+const getPendingEvents = async (req, res, next) => {
+  try {
+    const result = await query(`
+      SELECT 
+        e.id,
+        e.name,
+        e.description,
+        e.event_type,
+        e.registration_fee,
+        e.start_date,
+        e.end_date,
+        e.max_participants,
+        e.status,
+        e.created_at,
+        em.full_name as event_manager_name,
+        em.email as event_manager_email,
+        em.organization
+      FROM events e
+      INNER JOIN event_managers em ON e.created_by_manager_id = em.id
+      WHERE e.status = 'PENDING_APPROVAL'
+      ORDER BY e.created_at ASC
+    `);
+
+    return successResponse(res, {
+      pending_events: result.rows,
+      total_pending: result.rows.length
+    }, 'Pending events retrieved successfully');
+  } catch (error) {
+    next(error);
+  }
+};
+
+/**
+ * Get all events with optional filters
+ * @route GET /api/admin/events?status=ACTIVE&event_type=PAID
+ */
+const getAllEvents = async (req, res, next) => {
+  try {
+    const { status, event_type, event_manager_id } = req.query;
+    
+    let queryText = `
+      SELECT 
+        e.id,
+        e.name,
+        e.description,
+        e.event_type,
+        e.registration_fee,
+        e.start_date,
+        e.end_date,
+        e.registration_start,
+        e.registration_end,
+        e.max_participants,
+        e.status,
+        e.total_registrations,
+        e.total_revenue,
+        e.created_at,
+        e.approved_at,
+        em.full_name as event_manager_name,
+        em.organization,
+        a.full_name as approved_by_name
+      FROM events e
+      INNER JOIN event_managers em ON e.created_by_manager_id = em.id
+      LEFT JOIN admins a ON e.approved_by_admin_id = a.id
+      WHERE 1=1
+    `;
+
+    const params = [];
+    let paramCount = 1;
+
+    if (status) {
+      queryText += ` AND e.status = $${paramCount}`;
+      params.push(status);
+      paramCount++;
+    }
+
+    if (event_type) {
+      queryText += ` AND e.event_type = $${paramCount}`;
+      params.push(event_type);
+      paramCount++;
+    }
+
+    if (event_manager_id) {
+      queryText += ` AND e.created_by_manager_id = $${paramCount}`;
+      params.push(event_manager_id);
+      paramCount++;
+    }
+
+    queryText += ' ORDER BY e.start_date DESC, e.created_at DESC';
+
+    const result = await query(queryText, params);
+
+    return successResponse(res, {
+      events: result.rows,
+      total: result.rows.length
+    }, 'Events retrieved successfully');
+  } catch (error) {
+    next(error);
+  }
+};
+
+/**
+ * Approve event
+ * @route POST /api/admin/events/:id/approve
+ */
+const approveEvent = async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    const adminId = req.user.id;
+
+    const event = await Event.approveByAdmin(id, adminId, query);
+    if (!event) {
+      return errorResponse(res, 'Event not found or already processed', 404);
+    }
+
+    return successResponse(res, {
+      event
+    }, 'Event approved successfully');
+  } catch (error) {
+    next(error);
+  }
+};
+
+/**
+ * Reject event
+ * @route POST /api/admin/events/:id/reject
+ */
+const rejectEvent = async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    const { rejection_reason } = req.body;
+
+    if (!rejection_reason || rejection_reason.trim().length === 0) {
+      return errorResponse(res, 'Rejection reason is required', 400);
+    }
+
+    const event = await Event.rejectByAdmin(id, rejection_reason, query);
+    if (!event) {
+      return errorResponse(res, 'Event not found or already processed', 404);
+    }
+
+    return successResponse(res, {
+      event
+    }, 'Event rejected successfully');
+  } catch (error) {
+    next(error);
+  }
+};
+
+/**
+ * Get event details with registration stats
+ * @route GET /api/admin/events/:id
+ */
+const getEventDetails = async (req, res, next) => {
+  try {
+    const { id } = req.params;
+
+    const eventResult = await query(`
+      SELECT 
+        e.*,
+        em.full_name as event_manager_name,
+        em.email as event_manager_email,
+        em.phone as event_manager_phone,
+        em.organization,
+        a.full_name as approved_by_name,
+        COUNT(DISTINCT er.id) as total_registrations,
+        COUNT(DISTINCT CASE WHEN er.payment_status = 'COMPLETED' THEN er.id END) as paid_registrations,
+        COUNT(DISTINCT ev.volunteer_id) as total_volunteers
+      FROM events e
+      INNER JOIN event_managers em ON e.created_by_manager_id = em.id
+      LEFT JOIN admins a ON e.approved_by_admin_id = a.id
+      LEFT JOIN event_registrations er ON e.id = er.event_id
+      LEFT JOIN event_volunteers ev ON e.id = ev.event_id
+      WHERE e.id = $1
+      GROUP BY e.id, em.full_name, em.email, em.phone, em.organization, a.full_name
+    `, [id]);
+
+    if (eventResult.rows.length === 0) {
+      return errorResponse(res, 'Event not found', 404);
+    }
+
+    const event = eventResult.rows[0];
+
+    // Get recent registrations
+    const recentRegistrations = await query(`
+      SELECT 
+        er.id,
+        er.payment_status,
+        er.registration_fee_paid,
+        er.registered_at,
+        s.enrollment_no,
+        s.full_name as student_name,
+        s.email as student_email,
+        sch.name as school_name
+      FROM event_registrations er
+      INNER JOIN students s ON er.student_id = s.id
+      INNER JOIN schools sch ON s.school_id = sch.id
+      WHERE er.event_id = $1
+      ORDER BY er.registered_at DESC
+      LIMIT 10
+    `, [id]);
+
+    return successResponse(res, {
+      event,
+      recent_registrations: recentRegistrations.rows
+    }, 'Event details retrieved successfully');
+  } catch (error) {
+    next(error);
+  }
+};
+
 export default {
   login,
   logout,
@@ -378,5 +878,17 @@ export default {
   getAllStalls,
   getStats,
   getTopSchools,
-  getTopStalls
+  getTopStalls,
+  // Multi-Event Support - Event Manager CRUD
+  createEventManager,
+  getEventManagerDetails,
+  updateEventManager,
+  deleteEventManager,
+  getAllEventManagers,
+  // Multi-Event Support - Event Management
+  getPendingEvents,
+  getAllEvents,
+  approveEvent,
+  rejectEvent,
+  getEventDetails
 };

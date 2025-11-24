@@ -3,9 +3,12 @@ import CheckInOut from '../models/CheckInOut.model.js';
 import Stall from '../models/Stall.model.js';
 import Feedback from '../models/Feedback.model.js';
 import Ranking from '../models/Ranking.model.js';
+import EventModel from '../models/Event.model.js';
+import EventRegistrationModel from '../models/EventRegistration.model.js';
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 import QRCodeService from '../services/qrCode.js';
+import PaymentService from '../services/payment.js';
 import { successResponse, errorResponse } from '../helpers/response.js';
 import { setAuthCookie, clearAuthCookie } from '../helpers/cookie.js';
 import { query } from '../config/db.js';
@@ -730,6 +733,371 @@ const resetPassword = async (req, res, next) => {
   }
 };
 
+/**
+ * Get available events (free and paid)
+ * @route GET /api/student/events
+ */
+const getAvailableEvents = async (req, res, next) => {
+  try {
+    const { event_type, event_category, search, page, limit } = req.query;
+
+    const result = await EventModel.getVisibleEvents({
+      event_type,
+      event_category,
+      search,
+      page: parseInt(page) || 1,
+      limit: parseInt(limit) || 20,
+      upcoming_only: true
+    });
+
+    return successResponse(res, result, 'Events retrieved successfully');
+  } catch (error) {
+    next(error);
+  }
+};
+
+/**
+ * Get single event details
+ * @route GET /api/student/events/:eventId
+ */
+const getEventDetails = async (req, res, next) => {
+  try {
+    const { eventId } = req.params;
+    const studentId = req.user.id;
+
+    const event = await EventModel.findById(eventId);
+    if (!event) {
+      return errorResponse(res, 'Event not found', 404);
+    }
+
+    // Check if student is already registered
+    const registration = await EventRegistrationModel.findByEventAndStudent(
+      eventId,
+      studentId
+    );
+
+    // Check registration status
+    const registrationStatus = await EventModel.isRegistrationOpen(eventId);
+
+    return successResponse(res, {
+      event,
+      is_registered: !!registration,
+      registration: registration || null,
+      registration_open: registrationStatus.open,
+      registration_message: registrationStatus.reason || 'Registration is open'
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+/**
+ * Register for free event
+ * @route POST /api/student/events/:eventId/register
+ */
+const registerForFreeEvent = async (req, res, next) => {
+  try {
+    const { eventId } = req.params;
+    const studentId = req.user.id;
+
+    // Get event details
+    const event = await EventModel.findById(eventId);
+    if (!event) {
+      return errorResponse(res, 'Event not found', 404);
+    }
+
+    // Check if event is free
+    if (event.event_type !== 'FREE') {
+      return errorResponse(res, 'This is a paid event. Use payment endpoint.', 400);
+    }
+
+    // Check registration status
+    const registrationStatus = await EventModel.isRegistrationOpen(eventId);
+    if (!registrationStatus.open) {
+      return errorResponse(res, registrationStatus.reason, 400);
+    }
+
+    // Check if already registered
+    const existing = await EventRegistrationModel.findByEventAndStudent(
+      eventId,
+      studentId
+    );
+    if (existing) {
+      return errorResponse(res, 'You are already registered for this event', 400);
+    }
+
+    // ✅ CRITICAL: Check event capacity before registration
+    if (event.max_capacity && event.current_registrations >= event.max_capacity) {
+      if (event.waitlist_enabled) {
+        console.log(`⚠️ [REGISTRATION] Event full, waitlist enabled: ${event.event_name}`);
+        return errorResponse(res, 
+          `Event is full (${event.max_capacity} capacity reached). Waitlist feature coming soon.`, 
+          400
+        );
+      } else {
+        console.log(`❌ [REGISTRATION] Event full, no waitlist: ${event.event_name}`);
+        return errorResponse(res, 
+          `Event is full. Registration closed. Capacity: ${event.max_capacity}`, 
+          400
+        );
+      }
+    }
+
+    console.log(`✅ [REGISTRATION] Capacity check passed: ${event.current_registrations}/${event.max_capacity || 'unlimited'}`);
+
+    // Create registration
+    const registration = await EventRegistrationModel.createFreeRegistration(
+      eventId,
+      studentId
+    );
+
+    return successResponse(
+      res,
+      { registration },
+      'Successfully registered for the event',
+      201
+    );
+  } catch (error) {
+    next(error);
+  }
+};
+
+/**
+ * Initiate payment for paid event
+ * @route POST /api/student/events/:eventId/payment/initiate
+ */
+const initiatePaidEventPayment = async (req, res, next) => {
+  try {
+    const { eventId } = req.params;
+    const studentId = req.user.id;
+
+    // Get event details
+    const event = await EventModel.findById(eventId);
+    if (!event) {
+      return errorResponse(res, 'Event not found', 404);
+    }
+
+    // Check if event is paid
+    if (event.event_type !== 'PAID') {
+      return errorResponse(res, 'This is a free event. Use free registration endpoint.', 400);
+    }
+
+    // Check registration status
+    const registrationStatus = await EventModel.isRegistrationOpen(eventId);
+    if (!registrationStatus.open) {
+      return errorResponse(res, registrationStatus.reason, 400);
+    }
+
+    // Check if already registered
+    const existing = await EventRegistrationModel.findByEventAndStudent(
+      eventId,
+      studentId
+    );
+    if (existing && existing.payment_status === 'COMPLETED') {
+      return errorResponse(res, 'You are already registered for this event', 400);
+    }
+
+    // ✅ CRITICAL: Check event capacity before payment initiation
+    if (event.max_capacity && event.current_registrations >= event.max_capacity) {
+      if (event.waitlist_enabled) {
+        console.log(`⚠️ [PAYMENT] Event full, waitlist enabled: ${event.event_name}`);
+        return errorResponse(res, 
+          `Event is full (${event.max_capacity} capacity reached). Waitlist feature coming soon.`, 
+          400
+        );
+      } else {
+        console.log(`❌ [PAYMENT] Event full, no waitlist: ${event.event_name}`);
+        return errorResponse(res, 
+          `Event is full. Registration closed. Capacity: ${event.max_capacity}`, 
+          400
+        );
+      }
+    }
+
+    console.log(`✅ [PAYMENT] Capacity check passed: ${event.current_registrations}/${event.max_capacity || 'unlimited'}`);
+
+    // Get student details
+    const student = await Student.findById(studentId, query);
+
+    // Create Razorpay order
+    const order = await PaymentService.createOrder({
+      amount: event.price,
+      currency: event.currency,
+      event_id: eventId,
+      student_id: studentId,
+      event_code: event.event_code
+    });
+
+    // Create or update registration record
+    let registration;
+    if (existing && existing.payment_status === 'PENDING') {
+      // Update existing pending registration
+      registration = await EventRegistrationModel.completePayment(existing.id, {
+        razorpay_payment_id: null,
+        razorpay_signature: null
+      });
+    } else {
+      // Create new registration
+      registration = await EventRegistrationModel.createPaidRegistration(
+        eventId,
+        studentId,
+        {
+          amount: event.price,
+          currency: event.currency,
+          razorpay_order_id: order.order_id
+        }
+      );
+    }
+
+    return successResponse(
+      res,
+      {
+        order,
+        registration_id: registration.id,
+        razorpay_key: PaymentService.getPublicKey(),
+        student: {
+          name: student.full_name,
+          email: student.email,
+          contact: student.phone
+        },
+        event: {
+          name: event.event_name,
+          code: event.event_code
+        }
+      },
+      'Payment order created successfully',
+      201
+    );
+  } catch (error) {
+    console.error('Payment initiation error:', error);
+    next(error);
+  }
+};
+
+/**
+ * Verify payment and complete registration
+ * @route POST /api/student/events/:eventId/payment/verify
+ */
+const verifyPayment = async (req, res, next) => {
+  try {
+    const { eventId } = req.params;
+    const { razorpay_order_id, razorpay_payment_id, razorpay_signature } = req.body;
+    const studentId = req.user.id;
+
+    // Validate inputs
+    if (!razorpay_order_id || !razorpay_payment_id || !razorpay_signature) {
+      return errorResponse(res, 'Invalid payment data', 400);
+    }
+
+    // Verify signature
+    const isValid = PaymentService.verifyPaymentSignature({
+      order_id: razorpay_order_id,
+      payment_id: razorpay_payment_id,
+      signature: razorpay_signature
+    });
+
+    if (!isValid) {
+      return errorResponse(res, 'Payment verification failed. Invalid signature.', 400);
+    }
+
+    // Find registration by order ID
+    const registration = await EventRegistrationModel.findByOrderId(razorpay_order_id);
+    if (!registration) {
+      return errorResponse(res, 'Registration not found', 404);
+    }
+
+    // Verify ownership
+    if (registration.student_id !== studentId) {
+      return errorResponse(res, 'Unauthorized', 403);
+    }
+
+    // Complete payment
+    const updated = await EventRegistrationModel.completePayment(registration.id, {
+      razorpay_payment_id,
+      razorpay_signature
+    });
+
+    return successResponse(
+      res,
+      { registration: updated },
+      'Payment verified successfully. You are now registered for the event!'
+    );
+  } catch (error) {
+    console.error('Payment verification error:', error);
+    next(error);
+  }
+};
+
+/**
+ * Get student's registered events
+ * @route GET /api/student/my-events
+ */
+const getMyRegisteredEvents = async (req, res, next) => {
+  try {
+    const studentId = req.user.id;
+    const { status, payment_status } = req.query;
+
+    const registrations = await EventRegistrationModel.getStudentRegistrations(
+      studentId,
+      { status, payment_status }
+    );
+
+    return successResponse(res, { registrations });
+  } catch (error) {
+    next(error);
+  }
+};
+
+/**
+ * Get universal student QR code (works for ALL registered events)
+ * @route GET /api/student/qr-code
+ * 
+ * UNIVERSAL QR CODE DESIGN:
+ * - One rotating QR per student (based on registration_no)
+ * - Works for ANY event student is registered for (free or paid)
+ * - Volunteer specifies event during scanning (route parameter)
+ * - Backend validates student registration for that specific event
+ * - Simpler UX: Student shows ONE QR for all events
+ */
+const getEventQRCode = async (req, res, next) => {
+  try {
+    const studentId = req.user.id;
+
+    // Get student details
+    const student = await Student.findById(studentId, query);
+
+    if (!student) {
+      return errorResponse(res, 'Student not found', 404);
+    }
+
+    // Generate UNIVERSAL rotating QR code (no event_id needed)
+    // This QR works for ALL events the student is registered for
+    const qrImage = await QRCodeService.generateRotatingQRCodeImage(student);
+
+    const secondsUntilRotation = QRCodeService.getSecondsUntilRotation();
+
+    return successResponse(res, {
+      qr_code: qrImage,
+      rotation_info: {
+        seconds_until_rotation: secondsUntilRotation,
+        rotation_interval_seconds: QRCodeService.ROTATION_INTERVAL_SECONDS,
+        grace_period_seconds: QRCodeService.GRACE_PERIOD_WINDOWS * QRCodeService.ROTATION_INTERVAL_SECONDS
+      },
+      student: {
+        registration_no: student.registration_no,
+        full_name: student.full_name
+      },
+      usage: {
+        type: 'UNIVERSAL',
+        description: 'This QR code works for ALL events you are registered for',
+        instructions: 'Show this QR code to volunteers at ANY event check-in'
+      }
+    }, 'Universal QR code generated successfully');
+  } catch (error) {
+    next(error);
+  }
+};
+
 export default {
   login,
   logout,
@@ -744,5 +1112,13 @@ export default {
   submitSchoolRanking,
   getMySchoolRanking,
   verifyResetCredentials,
-  resetPassword
+  resetPassword,
+  // Event-related methods
+  getAvailableEvents,
+  getEventDetails,
+  registerForFreeEvent,
+  initiatePaidEventPayment,
+  verifyPayment,
+  getMyRegisteredEvents,
+  getEventQRCode
 };

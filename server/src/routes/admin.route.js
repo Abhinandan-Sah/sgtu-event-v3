@@ -29,4 +29,82 @@ router.get('/stats', adminController.getStats);
 router.get('/top-schools', adminController.getTopSchools);
 router.get('/top-stalls', adminController.getTopStalls);
 
+// ============================================================
+// EVENT MANAGER MANAGEMENT ROUTES (Multi-Event Support)
+// ============================================================
+
+/**
+ * @route   POST /api/admin/event-managers
+ * @desc    Create new event manager account
+ * @access  Private (ADMIN)
+ */
+router.post('/event-managers', adminController.createEventManager);
+
+/**
+ * @route   GET /api/admin/event-managers
+ * @desc    Get all event managers
+ * @access  Private (ADMIN)
+ */
+router.get('/event-managers', adminController.getAllEventManagers);
+
+/**
+ * @route   GET /api/admin/event-managers/:id
+ * @desc    Get event manager details
+ * @access  Private (ADMIN)
+ */
+router.get('/event-managers/:id', adminController.getEventManagerDetails);
+
+/**
+ * @route   PUT /api/admin/event-managers/:id
+ * @desc    Update event manager account
+ * @access  Private (ADMIN)
+ */
+router.put('/event-managers/:id', adminController.updateEventManager);
+
+/**
+ * @route   DELETE /api/admin/event-managers/:id
+ * @desc    Delete event manager account
+ * @access  Private (ADMIN)
+ */
+router.delete('/event-managers/:id', adminController.deleteEventManager);
+
+// ============================================================
+// EVENT APPROVAL & MANAGEMENT ROUTES (Multi-Event Support)
+// ============================================================
+
+/**
+ * @route   GET /api/admin/events/pending
+ * @desc    Get all pending event approval requests
+ * @access  Private (ADMIN)
+ */
+router.get('/events/pending', adminController.getPendingEvents);
+
+/**
+ * @route   GET /api/admin/events
+ * @desc    Get all events with optional filters (status, type, manager)
+ * @access  Private (ADMIN)
+ */
+router.get('/events', adminController.getAllEvents);
+
+/**
+ * @route   GET /api/admin/events/:id
+ * @desc    Get event details with registration stats
+ * @access  Private (ADMIN)
+ */
+router.get('/events/:id', adminController.getEventDetails);
+
+/**
+ * @route   POST /api/admin/events/:id/approve
+ * @desc    Approve event
+ * @access  Private (ADMIN)
+ */
+router.post('/events/:id/approve', adminController.approveEvent);
+
+/**
+ * @route   POST /api/admin/events/:id/reject
+ * @desc    Reject event with reason
+ * @access  Private (ADMIN)
+ */
+router.post('/events/:id/reject', adminController.rejectEvent);
+
 export default router;

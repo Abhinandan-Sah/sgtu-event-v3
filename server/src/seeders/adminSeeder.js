@@ -6,19 +6,7 @@ const admins = [
   {
     email: 'admin@sgtu.ac.in',
     password: 'admin123',
-    full_name: 'Super Admin',
-    role: 'SUPER_ADMIN'
-  },
-  {
-    email: 'event.coordinator@sgtu.ac.in',
-    password: 'coordinator123',
-    full_name: 'Event Coordinator',
-    role: 'ADMIN'
-  },
-  {
-    email: 'manager@sgtu.ac.in',
-    password: 'manager123',
-    full_name: 'Event Manager',
+    full_name: 'System Admin',
     role: 'ADMIN'
   }
 ];

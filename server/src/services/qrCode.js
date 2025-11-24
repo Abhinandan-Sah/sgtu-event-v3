@@ -27,6 +27,9 @@ class QRCodeService {
    * Token format: JWT with { r: registration_no, w: time_window, h: hmac, t: 'RS' }
    * Token size: ~120-140 characters (creates Version 4 QR code - clean & scannable)
    * 
+   * UNIVERSAL QR CODE: One QR per student works for ALL events (free & paid)
+   * Event validation happens during scanning, not in QR token
+   * 
    * @param {Object} student - Student object with registration_no
    * @returns {string} JWT token that expires in 90 seconds (covers 3 time windows)
    */
@@ -63,6 +66,9 @@ class QRCodeService {
   /**
    * Verify rotating student QR token
    * Validates HMAC signature and checks if time window is within grace period
+   * 
+   * UNIVERSAL QR CODE: Token identifies student only, not event
+   * Event authorization checked separately in database during scanning
    * 
    * @param {string} token - JWT token from QR code
    * @returns {Object} { valid, registration_no, time_window, isStatic } or { valid: false }
@@ -125,6 +131,8 @@ class QRCodeService {
    * Caches QR image with key based on time window for automatic expiration
    * Redis key includes time window, so cache auto-expires when rotation happens
    * 
+   * UNIVERSAL QR CODE: Same QR works for all events student is registered for
+   * 
    * @param {Object} student - Student object with registration_no
    * @param {Object} options - QR code generation options
    * @returns {Promise<string>} Base64 QR code image (data URL)
@@ -144,7 +152,7 @@ class QRCodeService {
       console.log('⚠️ [CACHE] Redis read failed:', error.message);
     }
 
-    // 2. Generate fresh rotating token
+    // 2. Generate fresh rotating token (universal for all events)
     const token = this.generateRotatingStudentToken(student);
 
     // 3. Generate QR code image
@@ -163,7 +171,7 @@ class QRCodeService {
 
     const qrCodeDataURL = await QRCode.toDataURL(token, qrOptions);
 
-    // 4. Cache in Redis with TTL = rotation interval (30 seconds)
+    // 4. Cache in Redis with TTL = rotation interval (60 seconds)
     try {
       await redisClient.setex(
         cacheKey,

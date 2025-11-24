@@ -45,7 +45,8 @@ app.get('/api', (req, res) => {
       admin: '/api/admin',
       feedback: '/api/feedback',
       ranking: '/api/ranking',
-      checkInOut: '/api/check-in-out'
+      checkInOut: '/api/check-in-out',
+      eventManagers: '/api/event-managers' // ✅ Fixed: plural form
     }
   });
 });
@@ -58,7 +59,8 @@ import {
   stallRoutes,
   feedbackRoutes,
   rankingRoutes,
-  checkInOutRoutes
+  checkInOutRoutes,
+  eventManagerRoutes
 } from './routes/index.js';
 
 // Use routes
@@ -69,6 +71,7 @@ app.use('/api/stall', stallRoutes);
 app.use('/api/feedback', feedbackRoutes);
 app.use('/api/ranking', rankingRoutes);
 app.use('/api/check-in-out', checkInOutRoutes);
+app.use('/api/event-manager', eventManagerRoutes); // ✅ Fixed: plural to match route definitions
 
 // 404 handler
 app.use((req, res) => {

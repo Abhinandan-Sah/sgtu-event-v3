@@ -28,4 +28,23 @@ router.post('/scan/student', volunteerController.scanStudentQR);
 // Totel Number of Scan by Volunteer History route
 router.get('/history', volunteerController.getHistory);
 
+// ============================================================
+// EVENT ASSIGNMENT ROUTES (Multi-Event Support)
+// ============================================================
+
+/**
+ * @route   GET /api/volunteer/assigned-events
+ * @desc    Get events assigned to volunteer
+ * @access  Private (VOLUNTEER)
+ * @note    Volunteers can see which events they're assigned to
+ */
+router.get('/assigned-events', volunteerController.getAssignedEvents);
+
+/**
+ * @note    UNIVERSAL SCANNER: /scan/student handles ALL scenarios
+ *          - Original check-in/check-out (legacy single event)
+ *          - Multi-event scenarios (automatically validates registration)
+ *          - No need for separate event-specific scan endpoints
+ */
+
 export default router;

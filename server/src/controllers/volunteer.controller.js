@@ -2,6 +2,8 @@ import Volunteer from '../models/Volunteer.model.js';
 import Student from '../models/Student.model.js';
 import Stall from '../models/Stall.model.js';
 import CheckInOut from '../models/CheckInOut.model.js';
+import EventVolunteerModel from '../models/EventVolunteer.model.js';
+import EventRegistrationModel from '../models/EventRegistration.model.js';
 import QRCodeService from '../services/qrCode.js';
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
@@ -244,6 +246,45 @@ const scanStudentQR = async (req, res, next) => {
       console.log('✅ [SCAN] Volunteer:', volunteer.full_name, '| Location:', volunteer.assigned_location);
     }
 
+    // 🔒 CRITICAL: Multi-Event Context Validation (Security Layer)
+    const volunteerAssignment = await EventVolunteerModel.findActiveAssignment(req.user.id);
+    let eventContext = null;
+
+    if (volunteerAssignment) {
+      console.log(`🎯 [SCAN] Volunteer assigned to event: ${volunteerAssignment.event_name} (${volunteerAssignment.event_type})`);
+      
+      // Verify student is registered for THIS specific event
+      const registration = await EventRegistrationModel.findByEventAndStudent(
+        volunteerAssignment.event_id,
+        student.id
+      );
+
+      if (!registration) {
+        console.log(`❌ [SCAN] Student not registered for event: ${volunteerAssignment.event_name}`);
+        return errorResponse(res, 
+          `Student is not registered for "${volunteerAssignment.event_name}". Please register first.`, 
+          403
+        );
+      }
+
+      // For paid events, verify payment is completed
+      if (registration.registration_type === 'PAID') {
+        if (registration.payment_status !== 'COMPLETED') {
+          console.log(`❌ [SCAN] Payment not completed for paid event`);
+          return errorResponse(res, 
+            `Payment pending for "${volunteerAssignment.event_name}". Amount: ${volunteerAssignment.currency} ${volunteerAssignment.price}`, 
+            402 // Payment Required
+          );
+        }
+        console.log(`✅ [SCAN] Payment verified: ${registration.payment_status}`);
+      }
+
+      console.log(`✅ [SCAN] Student authorized for event: ${volunteerAssignment.event_name}`);
+      eventContext = volunteerAssignment;
+    } else {
+      console.log('ℹ️ [SCAN] No active event assignment - using legacy single-event mode');
+    }
+
     // 4️⃣ 🎯 SMART LOGIC: Determine action based on current status
     const isCurrentlyInside = student.is_inside_event;
     const action = isCurrentlyInside ? 'EXIT' : 'ENTRY';
@@ -262,16 +303,20 @@ const scanStudentQR = async (req, res, next) => {
     let checkInOutRecord = null;
 
     if (action === 'ENTRY') {
-      // 🔥 FIX: Save check-in record to database
+      // 🔥 FIX: Save check-in record to database with event context
       checkInOutRecord = await CheckInOut.create({
         student_id: student.id,
         volunteer_id: req.user.id,
+        event_id: eventContext?.event_id || null, // ✅ Add event context for multi-event tracking
         scan_type: 'CHECKIN',
         scan_number: updatedStudent.total_scan_count,
         duration_minutes: null
       }, query);
       
       console.log('✅ [DB] Check-in record saved:', checkInOutRecord.id);
+      if (eventContext) {
+        console.log(`✅ [DB] Event context recorded: ${eventContext.event_name}`);
+      }
       
     } else if (action === 'EXIT' && previousCheckInTime) {
       const checkInTime = new Date(previousCheckInTime);
@@ -281,16 +326,20 @@ const scanStudentQR = async (req, res, next) => {
       console.log(`⏱️ [SCAN] Duration: ${durationMinutes} minutes (${Math.floor(durationMinutes / 60)}h ${durationMinutes % 60}m)`);
       console.log(`⏱️ [SCAN] Check-in: ${checkInTime.toISOString()}, Check-out: ${checkOutTime.toISOString()}`);
       
-      // 🔥 FIX: Save check-out record to database
+      // 🔥 FIX: Save check-out record to database with event context
       checkInOutRecord = await CheckInOut.create({
         student_id: student.id,
         volunteer_id: req.user.id,
+        event_id: eventContext?.event_id || null, // ✅ Add event context for multi-event tracking
         scan_type: 'CHECKOUT',
         scan_number: updatedStudent.total_scan_count,
         duration_minutes: durationMinutes
       }, query);
       
       console.log('✅ [DB] Check-out record saved:', checkInOutRecord.id);
+      if (eventContext) {
+        console.log(`✅ [DB] Event context recorded: ${eventContext.event_name}`);
+      }
       
       // Update total active duration
       await Student.updateActiveDuration(student.id, durationMinutes, query);
@@ -414,12 +463,38 @@ const getHistory = async (req, res, next) => {
   }
 };
 
+/**
+ * Get events assigned to volunteer
+ * @route GET /api/volunteer/assigned-events
+ */
+const getAssignedEvents = async (req, res, next) => {
+  try {
+    const volunteerId = req.user.id;
+    const { event_status } = req.query;
+
+    const events = await EventVolunteerModel.getVolunteerEvents(volunteerId, {
+      event_status,
+      is_active: true
+    });
+
+    return successResponse(res, {
+      total_events: events.length,
+      events,
+      note: 'Use universal /scan/student endpoint for all scanning operations'
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
 export default {
   login,
   register,
   logout,
   getProfile,
-  scanStudentQR,
+  scanStudentQR,  // ✅ Universal scanner - handles ALL scenarios
   scanStallQR,
-  getHistory
+  getHistory,
+  // Multi-event support
+  getAssignedEvents  // Volunteers can see their assigned events
 };

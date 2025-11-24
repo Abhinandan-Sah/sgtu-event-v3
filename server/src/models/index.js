@@ -7,6 +7,10 @@ import StallModel from './Stall.model.js';
 import FeedbackModel from './Feedback.model.js';
 import RankingModel from './Ranking.model.js';
 import CheckInOutModel from './CheckInOut.model.js';
+import EventManagerModel from './EventManager.model.js';
+import EventModel from './Event.model.js';
+import EventRegistrationModel from './EventRegistration.model.js';
+import EventVolunteerModel from './EventVolunteer.model.js';
 
 // Named exports (preferred for production - tree-shaking support)
 export {
@@ -17,5 +21,9 @@ export {
   StallModel,
   FeedbackModel,
   RankingModel,
-  CheckInOutModel
+  CheckInOutModel,
+  EventManagerModel,
+  EventModel,
+  EventRegistrationModel,
+  EventVolunteerModel
 };

@@ -36,19 +36,13 @@ import { getTokenFromCookie } from '../helpers/cookie.js';
  */
 export const authenticateToken = (req, res, next) => {
   try {
-    // Priority 1: Get token from HTTP-Only cookie (more secure)
-    let token = getTokenFromCookie(req);
-    
-    // Priority 2: Fallback to Authorization header (for mobile apps, Postman)
-    if (!token) {
-      const authHeader = req.headers['authorization'];
-      token = authHeader && authHeader.split(' ')[1]; // Bearer TOKEN
-    }
+    // Get token from HTTP-Only cookie only (more secure)
+    const token = getTokenFromCookie(req);
 
     if (!token) {
       return res.status(401).json({
         success: false,
-        message: 'Access token required'
+        message: 'Access token required. Please login.'
       });
     }
 
