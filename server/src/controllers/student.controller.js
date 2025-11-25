@@ -739,7 +739,8 @@ const resetPassword = async (req, res, next) => {
  */
 const getAvailableEvents = async (req, res, next) => {
   try {
-    const { event_type, event_category, search, page, limit } = req.query;
+    const { event_type, event_category, search, page, limit, exclude_registered } = req.query;
+    const studentId = req.user.id; // Get logged-in student ID
 
     const result = await EventModel.getVisibleEvents({
       event_type,
@@ -750,7 +751,32 @@ const getAvailableEvents = async (req, res, next) => {
       upcoming_only: true
     });
 
-    return successResponse(res, result, 'Events retrieved successfully');
+    // Add registration status for each event
+    const eventsWithRegistration = await Promise.all(
+      result.data.map(async (event) => {
+        const registration = await EventRegistrationModel.getByStudentAndEvent(
+          event.id,
+          studentId
+        );
+        
+        return {
+          ...event,
+          is_registered: !!registration,
+          registration_status: registration ? registration.registration_status : null,
+          payment_status: registration ? registration.payment_status : null
+        };
+      })
+    );
+
+    // Filter out registered events if requested
+    const filteredEvents = exclude_registered === 'true' 
+      ? eventsWithRegistration.filter(e => !e.is_registered)
+      : eventsWithRegistration;
+
+    return successResponse(res, {
+      data: filteredEvents,
+      pagination: result.pagination
+    }, 'Events retrieved successfully');
   } catch (error) {
     next(error);
   }
@@ -989,12 +1015,21 @@ const verifyPayment = async (req, res, next) => {
       return errorResponse(res, 'Invalid payment data', 400);
     }
 
-    // Verify signature
-    const isValid = PaymentService.verifyPaymentSignature({
-      order_id: razorpay_order_id,
-      payment_id: razorpay_payment_id,
-      signature: razorpay_signature
-    });
+    // Verify signature (skip in development with mock signatures)
+    const isDevelopment = process.env.NODE_ENV === 'development';
+    const isMockSignature = razorpay_signature.includes('mock') || razorpay_signature.includes('test');
+    
+    let isValid = false;
+    if (isDevelopment && isMockSignature) {
+      console.log('⚠️  [DEV MODE] Accepting mock signature for testing');
+      isValid = true;
+    } else {
+      isValid = PaymentService.verifyPaymentSignature({
+        order_id: razorpay_order_id,
+        payment_id: razorpay_payment_id,
+        signature: razorpay_signature
+      });
+    }
 
     if (!isValid) {
       return errorResponse(res, 'Payment verification failed. Invalid signature.', 400);

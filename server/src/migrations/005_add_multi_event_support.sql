@@ -312,12 +312,14 @@ ADD COLUMN IF NOT EXISTS total_paid_events INTEGER DEFAULT 0,
 ADD COLUMN IF NOT EXISTS total_spent_on_events DECIMAL(10, 2) DEFAULT 0.00;
 
 -- ============================================================
--- 8. ADD EVENT TRACKING TO VOLUNTEERS
--- Track which events volunteers are assigned to
+-- ============================================================
+-- 8. ADD EVENT TRACKING TO VOLUNTEERS - DISABLED
+-- Note: Column not needed - can query event_volunteers table directly
+-- Keeping this commented for reference
 -- ============================================================
 
-ALTER TABLE volunteers
-ADD COLUMN IF NOT EXISTS total_events_assigned INTEGER DEFAULT 0;
+-- ALTER TABLE volunteers
+-- ADD COLUMN IF NOT EXISTS total_events_assigned INTEGER DEFAULT 0;
 
 -- ============================================================
 -- 9. HELPER FUNCTIONS AND TRIGGERS
@@ -393,32 +395,11 @@ AFTER INSERT OR UPDATE OR DELETE ON event_registrations
 FOR EACH ROW
 EXECUTE FUNCTION update_event_registration_count();
 
--- Function to update volunteer event assignment count
-CREATE OR REPLACE FUNCTION update_volunteer_event_count()
-RETURNS TRIGGER AS $$
-BEGIN
-    IF TG_OP = 'INSERT' THEN
-        UPDATE volunteers 
-        SET total_events_assigned = total_events_assigned + 1,
-            updated_at = NOW()
-        WHERE id = NEW.volunteer_id;
-    ELSIF TG_OP = 'DELETE' THEN
-        UPDATE volunteers 
-        SET total_events_assigned = total_events_assigned - 1,
-            updated_at = NOW()
-        WHERE id = OLD.volunteer_id;
-    END IF;
-    
-    RETURN COALESCE(NEW, OLD);
-END;
-$$ LANGUAGE plpgsql;
-
--- Trigger for event_volunteers
-DROP TRIGGER IF EXISTS trg_update_volunteer_event_count ON event_volunteers;
-CREATE TRIGGER trg_update_volunteer_event_count
-AFTER INSERT OR DELETE ON event_volunteers
-FOR EACH ROW
-EXECUTE FUNCTION update_volunteer_event_count();
+-- ============================================================
+-- VOLUNTEER EVENT COUNT TRIGGER - DISABLED
+-- Note: Removed because total_events_assigned column not needed
+-- Can query event_volunteers table directly for count
+-- ============================================================
 
 -- Function to update event manager stats
 CREATE OR REPLACE FUNCTION update_event_manager_stats()
@@ -459,6 +440,66 @@ COMMENT ON TABLE events IS 'Core events table supporting free and paid events wi
 COMMENT ON TABLE event_volunteers IS 'Junction table mapping volunteers to events they can scan for';
 COMMENT ON TABLE event_registrations IS 'Student registrations for events with payment tracking';
 COMMENT ON TABLE event_permissions IS 'Audit trail for admin approvals/rejections of events';
+
+-- ============================================================
+-- FINAL VERIFICATION: Ensure all required columns exist
+-- ============================================================
+
+-- Ensure check_in_outs has event_id
+DO $$ 
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns 
+        WHERE table_name = 'check_in_outs' AND column_name = 'event_id'
+    ) THEN
+        ALTER TABLE check_in_outs 
+        ADD COLUMN event_id UUID REFERENCES events(id) ON DELETE CASCADE;
+        
+        CREATE INDEX IF NOT EXISTS idx_check_in_outs_event ON check_in_outs(event_id);
+    END IF;
+END $$;
+
+-- Ensure students has tracking columns
+DO $$ 
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns 
+        WHERE table_name = 'students' AND column_name = 'total_events_registered'
+    ) THEN
+        ALTER TABLE students
+        ADD COLUMN total_events_registered INTEGER DEFAULT 0,
+        ADD COLUMN total_paid_events INTEGER DEFAULT 0,
+        ADD COLUMN total_spent_on_events DECIMAL(10, 2) DEFAULT 0.00;
+    END IF;
+END $$;
+
+-- Ensure stalls has event_id column
+DO $$ 
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns 
+        WHERE table_name = 'stalls' AND column_name = 'event_id'
+    ) THEN
+        ALTER TABLE stalls 
+        ADD COLUMN event_id UUID REFERENCES events(id) ON DELETE CASCADE;
+        
+        CREATE INDEX IF NOT EXISTS idx_stalls_event ON stalls(event_id);
+    END IF;
+END $$;
+
+-- Ensure feedbacks has event_id column
+DO $$ 
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns 
+        WHERE table_name = 'feedbacks' AND column_name = 'event_id'
+    ) THEN
+        ALTER TABLE feedbacks 
+        ADD COLUMN event_id UUID REFERENCES events(id) ON DELETE CASCADE;
+        
+        CREATE INDEX IF NOT EXISTS idx_feedbacks_event ON feedbacks(event_id);
+    END IF;
+END $$;
 
 -- ============================================================
 -- MIGRATION COMPLETE

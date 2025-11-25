@@ -71,7 +71,7 @@ app.use('/api/stall', stallRoutes);
 app.use('/api/feedback', feedbackRoutes);
 app.use('/api/ranking', rankingRoutes);
 app.use('/api/check-in-out', checkInOutRoutes);
-app.use('/api/event-manager', eventManagerRoutes); // ✅ Fixed: plural to match route definitions
+app.use('/api/event-manager', eventManagerRoutes); 
 
 // 404 handler
 app.use((req, res) => {

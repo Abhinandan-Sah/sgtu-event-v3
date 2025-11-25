@@ -1,5 +1,5 @@
 // Event Model - Core events with free/paid support, admin approval workflow
-import sql from '../config/db.js';
+import { pool } from '../config/db.js';
 
 class Event {
   /**
@@ -45,7 +45,7 @@ class Event {
       throw new Error('Registration start date must be before end date');
     }
 
-    const result = await sql`
+    const result = await pool`
       INSERT INTO events (
         event_name, event_code, description, event_type, price, currency,
         event_category, tags, venue,
@@ -59,11 +59,11 @@ class Event {
       )
       VALUES (
         ${event_name}, ${event_code}, ${description}, ${event_type}, ${price}, ${currency},
-        ${event_category}, ${sql.array(tags)}, ${venue},
+        ${event_category}, ${tags}, ${venue},
         ${start_date}, ${end_date}, ${registration_start_date}, ${registration_end_date},
         ${max_capacity}, ${waitlist_enabled},
         ${refund_policy}, ${refund_enabled},
-        ${banner_image_url}, ${sql.array(event_images)},
+        ${banner_image_url}, ${event_images},
         ${managerId},
         ${requires_approval},
         ${requires_approval ? 'PENDING_APPROVAL' : 'APPROVED'}
@@ -80,7 +80,7 @@ class Event {
    * @returns {Promise<Object|null>}
    */
   static async findById(eventId) {
-    const result = await sql`
+    const result = await pool`
       SELECT 
         e.*,
         em.full_name as manager_name,
@@ -101,7 +101,7 @@ class Event {
    * @returns {Promise<Object|null>}
    */
   static async findByCode(eventCode) {
-    const result = await sql`
+    const result = await pool`
       SELECT * FROM events 
       WHERE event_code = ${eventCode}
       LIMIT 1
@@ -136,12 +136,20 @@ class Event {
       throw new Error('No valid fields to update');
     }
 
-    const result = await sql`
-      UPDATE events 
-      SET ${sql(updateFields)}, updated_at = NOW()
-      WHERE id = ${eventId}
-      RETURNING *
-    `;
+    // Build SET clause with numbered parameters
+    const keys = Object.keys(updateFields);
+    const values = Object.values(updateFields);
+    const setClause = keys
+      .map((key, index) => `${key} = $${index + 1}`)
+      .join(', ');
+
+    const result = await pool(
+      `UPDATE events 
+       SET ${setClause}, updated_at = NOW()
+       WHERE id = $${values.length + 1}
+       RETURNING *`,
+      [...values, eventId]
+    );
 
     if (result.length === 0) {
       throw new Error('Event not found');
@@ -157,7 +165,31 @@ class Event {
    * @returns {Promise<Object>}
    */
   static async approveByAdmin(eventId, adminId) {
-    const result = await sql`
+    // First check if event exists and its current status
+    const checkEvent = await pool`
+      SELECT * FROM events WHERE id = ${eventId}
+    `;
+
+    if (checkEvent.length === 0) {
+      throw new Error('Event not found');
+    }
+
+    const event = checkEvent[0];
+
+    // If already approved, return with flag
+    if (event.status === 'APPROVED') {
+      return {
+        ...event,
+        already_approved: true
+      };
+    }
+
+    // If not in pending status, can't approve
+    if (event.status !== 'PENDING_APPROVAL') {
+      throw new Error(`Cannot approve event with status: ${event.status}`);
+    }
+
+    const result = await pool`
       UPDATE events 
       SET 
         status = 'APPROVED',
@@ -166,28 +198,32 @@ class Event {
         admin_rejection_reason = NULL,
         updated_at = NOW()
       WHERE id = ${eventId}
-        AND status = 'PENDING_APPROVAL'
       RETURNING *
     `;
 
     if (result.length === 0) {
-      throw new Error('Event not found or not in pending status');
+      throw new Error('Failed to update event');
     }
 
-    // Create permission record
-    await sql`
-      INSERT INTO event_permissions (
-        event_id, manager_id, admin_id, permission_type, reason
-      )
-      SELECT 
-        ${eventId},
-        created_by_manager_id,
-        ${adminId},
-        'APPROVED',
-        'Event approved by admin'
-      FROM events
-      WHERE id = ${eventId}
-    `;
+    // Create permission record (optional audit trail)
+    try {
+      await pool`
+        INSERT INTO event_permissions (
+          event_id, manager_id, admin_id, permission_type, reason
+        )
+        SELECT 
+          ${eventId},
+          created_by_manager_id,
+          ${adminId},
+          'APPROVED',
+          'Event approved by admin'
+        FROM events
+        WHERE id = ${eventId}
+      `;
+    } catch (permError) {
+      console.warn('Failed to create permission record:', permError.message);
+      // Continue even if permission record fails
+    }
 
     return result[0];
   }
@@ -200,7 +236,31 @@ class Event {
    * @returns {Promise<Object>}
    */
   static async rejectByAdmin(eventId, adminId, reason) {
-    const result = await sql`
+    // First check if event exists and its current status
+    const checkEvent = await pool`
+      SELECT * FROM events WHERE id = ${eventId}
+    `;
+
+    if (checkEvent.length === 0) {
+      throw new Error('Event not found');
+    }
+
+    const event = checkEvent[0];
+
+    // If already rejected/cancelled, return with flag
+    if (event.status === 'CANCELLED' || event.status === 'REJECTED') {
+      return {
+        ...event,
+        already_rejected: true
+      };
+    }
+
+    // If not in pending status, can't reject
+    if (event.status !== 'PENDING_APPROVAL') {
+      throw new Error(`Cannot reject event with status: ${event.status}`);
+    }
+
+    const result = await pool`
       UPDATE events 
       SET 
         status = 'CANCELLED',
@@ -208,28 +268,32 @@ class Event {
         admin_rejection_reason = ${reason},
         updated_at = NOW()
       WHERE id = ${eventId}
-        AND status = 'PENDING_APPROVAL'
       RETURNING *
     `;
 
     if (result.length === 0) {
-      throw new Error('Event not found or not in pending status');
+      throw new Error('Failed to update event');
     }
 
-    // Create permission record
-    await sql`
-      INSERT INTO event_permissions (
-        event_id, manager_id, admin_id, permission_type, reason
-      )
-      SELECT 
-        ${eventId},
-        created_by_manager_id,
-        ${adminId},
-        'REJECTED',
-        ${reason}
-      FROM events
-      WHERE id = ${eventId}
-    `;
+    // Create permission record (optional audit trail)
+    try {
+      await pool`
+        INSERT INTO event_permissions (
+          event_id, manager_id, admin_id, permission_type, reason
+        )
+        SELECT 
+          ${eventId},
+          created_by_manager_id,
+          ${adminId},
+          'REJECTED',
+          ${reason}
+        FROM events
+        WHERE id = ${eventId}
+      `;
+    } catch (permError) {
+      console.warn('Failed to create permission record:', permError.message);
+      // Continue even if permission record fails
+    }
 
     return result[0];
   }
@@ -250,7 +314,7 @@ class Event {
       throw new Error(`Invalid status: ${newStatus}`);
     }
 
-    const result = await sql`
+    const result = await pool`
       UPDATE events 
       SET status = ${newStatus}, updated_at = NOW()
       WHERE id = ${eventId}
@@ -328,18 +392,24 @@ class Event {
 
     const whereClause = conditions.join(' AND ');
 
-    const result = await sql`
-      SELECT 
-        e.*,
-        em.full_name as manager_name,
-        em.email as manager_email,
-        COUNT(*) OVER() as total_count
-      FROM events e
-      LEFT JOIN event_managers em ON e.created_by_manager_id = em.id
-      WHERE ${sql.unsafe(whereClause)}
-      ORDER BY e.created_at DESC
-      LIMIT ${limit} OFFSET ${offset}
-    `;
+    // Add limit and offset params
+    params.push(limit, offset);
+    const limitIdx = params.length - 1;
+    const offsetIdx = params.length;
+
+    const result = await pool(
+      `SELECT 
+         e.*,
+         em.full_name as manager_name,
+         em.email as manager_email,
+         COUNT(*) OVER() as total_count
+       FROM events e
+       LEFT JOIN event_managers em ON e.created_by_manager_id = em.id
+       WHERE ${whereClause}
+       ORDER BY e.created_at DESC
+       LIMIT $${limitIdx} OFFSET $${offsetIdx}`,
+      params
+    );
 
     return {
       data: result,
@@ -369,44 +439,56 @@ class Event {
 
     const offset = (page - 1) * limit;
 
-    let conditions = [
+    const conditions = [
       'e.is_visible = TRUE',
       'e.status IN (\'APPROVED\', \'ACTIVE\')',
       'e.registration_end_date > NOW()'
     ];
+    const params = [];
 
     if (event_type) {
-      conditions.push(sql`e.event_type = ${event_type}`);
+      conditions.push(`e.event_type = $${params.length + 1}`);
+      params.push(event_type);
     }
 
     if (event_category) {
-      conditions.push(sql`e.event_category = ${event_category}`);
+      conditions.push(`e.event_category = $${params.length + 1}`);
+      params.push(event_category);
     }
 
     if (search) {
-      conditions.push(sql`(e.event_name ILIKE ${`%${search}%`} OR e.description ILIKE ${`%${search}%`})`);
+      conditions.push(`(e.event_name ILIKE $${params.length + 1} OR e.description ILIKE $${params.length + 1})`);
+      params.push(`%${search}%`);
     }
 
     if (upcoming_only) {
-      conditions.push(sql`e.start_date > NOW()`);
+      conditions.push('e.start_date > NOW()');
     }
 
-    const result = await sql`
-      SELECT 
-        e.id, e.event_name, e.event_code, e.description,
-        e.event_type, e.price, e.currency,
-        e.event_category, e.tags, e.venue,
-        e.start_date, e.end_date,
-        e.registration_start_date, e.registration_end_date,
-        e.max_capacity, e.current_registrations,
-        e.status, e.banner_image_url,
-        (e.max_capacity IS NOT NULL AND e.current_registrations >= e.max_capacity) as is_full,
-        COUNT(*) OVER() as total_count
-      FROM events e
-      WHERE ${sql.and(conditions)}
-      ORDER BY e.start_date ASC
-      LIMIT ${limit} OFFSET ${offset}
-    `;
+    const whereClause = conditions.join(' AND ');
+    
+    // Add limit and offset params
+    params.push(limit, offset);
+    const limitIdx = params.length - 1;
+    const offsetIdx = params.length;
+
+    const result = await pool(
+      `SELECT 
+         e.id, e.event_name, e.event_code, e.description,
+         e.event_type, e.price, e.currency,
+         e.event_category, e.tags, e.venue,
+         e.start_date, e.end_date,
+         e.registration_start_date, e.registration_end_date,
+         e.max_capacity, e.current_registrations,
+         e.status, e.banner_image_url,
+         (e.max_capacity IS NOT NULL AND e.current_registrations >= e.max_capacity) as is_full,
+         COUNT(*) OVER() as total_count
+       FROM events e
+       WHERE ${whereClause}
+       ORDER BY e.start_date ASC
+       LIMIT $${limitIdx} OFFSET $${offsetIdx}`,
+      params
+    );
 
     return {
       data: result,
@@ -424,7 +506,7 @@ class Event {
    * @returns {Promise<Array>}
    */
   static async getPendingApprovals() {
-    return await sql`
+    return await pool`
       SELECT 
         e.*,
         em.full_name as manager_name,
@@ -443,20 +525,16 @@ class Event {
    * @returns {Promise<Object>}
    */
   static async getStats(eventId) {
-    const result = await sql`
+    const result = await pool`
       SELECT 
         e.*,
         COUNT(DISTINCT er.id) FILTER (WHERE er.registration_status = 'CONFIRMED') as confirmed_registrations,
+        COUNT(DISTINCT er.id) FILTER (WHERE er.registration_status = 'WAITLISTED') as waitlisted_registrations,
         COUNT(DISTINCT er.id) FILTER (WHERE er.has_checked_in = TRUE) as total_check_ins,
-        COUNT(DISTINCT er.id) FILTER (WHERE er.has_submitted_feedback = TRUE) as total_feedbacks_submitted,
-        COUNT(DISTINCT ev.volunteer_id) as volunteers_assigned,
-        COUNT(DISTINCT s.id) as total_stalls,
-        COALESCE(AVG(f.rating), 0) as average_event_rating
+        COUNT(DISTINCT ev.volunteer_id) as volunteers_assigned
       FROM events e
       LEFT JOIN event_registrations er ON e.id = er.event_id
       LEFT JOIN event_volunteers ev ON e.id = ev.event_id
-      LEFT JOIN stalls s ON e.id = s.event_id
-      LEFT JOIN feedbacks f ON e.id = f.event_id
       WHERE e.id = ${eventId}
       GROUP BY e.id
     `;
@@ -471,7 +549,7 @@ class Event {
    */
   static async delete(eventId) {
     // Check if event has registrations
-    const registrations = await sql`
+    const registrations = await pool`
       SELECT COUNT(*) as count 
       FROM event_registrations 
       WHERE event_id = ${eventId}
@@ -483,7 +561,7 @@ class Event {
     }
 
     // Soft delete
-    await sql`
+    await pool`
       UPDATE events 
       SET status = 'CANCELLED', updated_at = NOW()
       WHERE id = ${eventId}
@@ -498,7 +576,7 @@ class Event {
    * @returns {Promise<Object>}
    */
   static async isRegistrationOpen(eventId) {
-    const result = await sql`
+    const result = await pool`
       SELECT 
         e.id,
         e.registration_start_date,
@@ -540,25 +618,25 @@ class Event {
     const { status, page = 1, limit = 20 } = filters;
     const offset = (page - 1) * limit;
 
-    let query = sql`
+    let queryStr = `
       SELECT 
         e.*,
         COUNT(*) OVER() as total_count
       FROM events e
-      WHERE e.created_by_manager_id = ${managerId}
+      WHERE e.created_by_manager_id = $1
     `;
+    
+    const params = [managerId];
 
     if (status) {
-      query = sql`${query} AND e.status = ${status}`;
+      params.push(status);
+      queryStr += ` AND e.status = $${params.length}`;
     }
 
-    query = sql`
-      ${query}
-      ORDER BY e.created_at DESC
-      LIMIT ${limit} OFFSET ${offset}
-    `;
+    queryStr += ` ORDER BY e.created_at DESC LIMIT $${params.length + 1} OFFSET $${params.length + 2}`;
+    params.push(limit, offset);
 
-    const result = await query;
+    const result = await pool(queryStr, params);
 
     return {
       data: result,

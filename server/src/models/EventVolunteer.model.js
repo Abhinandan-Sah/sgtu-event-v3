@@ -1,5 +1,5 @@
 // EventVolunteer Model - Junction table for event-volunteer assignments
-import sql from '../config/db.js';
+import { pool } from '../config/db.js';
 
 class EventVolunteer {
   /**
@@ -16,14 +16,14 @@ class EventVolunteer {
       permissions = ['SCAN', 'VIEW_STUDENTS']
     } = details;
 
-    const result = await sql`
+    const result = await pool`
       INSERT INTO event_volunteers (
         event_id, volunteer_id, assigned_by_manager_id,
         assigned_location, permissions
       )
       VALUES (
         ${eventId}, ${volunteerId}, ${managerId},
-        ${assigned_location}, ${sql.array(permissions)}
+        ${assigned_location}, ${permissions}
       )
       ON CONFLICT (event_id, volunteer_id) 
       DO UPDATE SET
@@ -44,7 +44,7 @@ class EventVolunteer {
    * @returns {Promise<boolean>}
    */
   static async removeVolunteer(eventId, volunteerId) {
-    const result = await sql`
+    const result = await pool`
       UPDATE event_volunteers 
       SET is_active = FALSE, updated_at = NOW()
       WHERE event_id = ${eventId} 
@@ -62,7 +62,7 @@ class EventVolunteer {
    * @returns {Promise<Object|null>}
    */
   static async findAssignment(eventId, volunteerId) {
-    const result = await sql`
+    const result = await pool`
       SELECT 
         ev.*,
         e.event_name,
@@ -90,7 +90,7 @@ class EventVolunteer {
   static async getEventVolunteers(eventId, filters = {}) {
     const { is_active = true } = filters;
 
-    return await sql`
+    return await pool`
       SELECT 
         ev.*,
         v.full_name as volunteer_name,
@@ -116,36 +116,43 @@ class EventVolunteer {
   static async getVolunteerEvents(volunteerId, filters = {}) {
     const { event_status, is_active = true } = filters;
 
-    let conditions = [
-      sql`ev.volunteer_id = ${volunteerId}`,
-      sql`ev.is_active = ${is_active}`
+    const conditions = [
+      'ev.volunteer_id = $1',
+      'ev.is_active = $2'
     ];
+    const params = [volunteerId, is_active];
 
     if (event_status) {
-      conditions.push(sql`e.status = ${event_status}`);
+      conditions.push(`e.status = $${params.length + 1}`);
+      params.push(event_status);
     }
 
-    return await sql`
-      SELECT 
-        ev.*,
-        e.event_name,
-        e.event_code,
-        e.event_type,
-        e.event_category,
-        e.venue,
-        e.start_date,
-        e.end_date,
-        e.status as event_status,
-        e.current_registrations,
-        e.max_capacity,
-        em.full_name as manager_name,
-        em.email as manager_email
-      FROM event_volunteers ev
-      LEFT JOIN events e ON ev.event_id = e.id
-      LEFT JOIN event_managers em ON e.created_by_manager_id = em.id
-      WHERE ${sql.and(conditions)}
-      ORDER BY e.start_date ASC
-    `;
+    const whereClause = conditions.join(' AND ');
+
+    const result = await pool(
+      `SELECT 
+         ev.*,
+         e.event_name,
+         e.event_code,
+         e.event_type,
+         e.event_category,
+         e.venue,
+         e.start_date,
+         e.end_date,
+         e.status as event_status,
+         e.current_registrations,
+         e.max_capacity,
+         em.full_name as manager_name,
+         em.email as manager_email
+       FROM event_volunteers ev
+       LEFT JOIN events e ON ev.event_id = e.id
+       LEFT JOIN event_managers em ON e.created_by_manager_id = em.id
+       WHERE ${whereClause}
+       ORDER BY e.start_date ASC`,
+      params
+    );
+
+    return result || [];
   }
 
   /**
@@ -156,10 +163,10 @@ class EventVolunteer {
    * @returns {Promise<Object>}
    */
   static async updatePermissions(eventId, volunteerId, permissions) {
-    const result = await sql`
+    const result = await pool`
       UPDATE event_volunteers 
       SET 
-        permissions = ${sql.array(permissions)},
+        permissions = ${permissions},
         updated_at = NOW()
       WHERE event_id = ${eventId} 
         AND volunteer_id = ${volunteerId}
@@ -181,7 +188,7 @@ class EventVolunteer {
    * @returns {Promise<Object>}
    */
   static async updateLocation(eventId, volunteerId, location) {
-    const result = await sql`
+    const result = await pool`
       UPDATE event_volunteers 
       SET 
         assigned_location = ${location},
@@ -205,7 +212,7 @@ class EventVolunteer {
    * @returns {Promise<Object>}
    */
   static async incrementScanCount(eventId, volunteerId) {
-    const result = await sql`
+    const result = await pool`
       UPDATE event_volunteers 
       SET 
         total_scans_for_event = total_scans_for_event + 1,
@@ -224,7 +231,7 @@ class EventVolunteer {
    * @returns {Promise<Object>}
    */
   static async getEventStats(eventId) {
-    const result = await sql`
+    const result = await pool`
       SELECT 
         COUNT(*) as total_volunteers,
         COUNT(*) FILTER (WHERE is_active = TRUE) as active_volunteers,
@@ -242,7 +249,7 @@ class EventVolunteer {
    * @returns {Promise<Array>}
    */
   static async getVolunteerPerformance(eventId) {
-    return await sql`
+    return await pool`
       SELECT 
         ev.volunteer_id,
         v.full_name as volunteer_name,
@@ -337,7 +344,7 @@ class EventVolunteer {
    * @returns {Promise<boolean>}
    */
   static async delete(eventId, volunteerId) {
-    await sql`
+    await pool`
       DELETE FROM event_volunteers 
       WHERE event_id = ${eventId} 
         AND volunteer_id = ${volunteerId}
@@ -352,7 +359,7 @@ class EventVolunteer {
    * @returns {Promise<Object|null>} Active event assignment or null
    */
   static async findActiveAssignment(volunteerId) {
-    const result = await sql`
+    const result = await pool`
       SELECT 
         ev.*,
         e.event_name,

@@ -1,5 +1,5 @@
 // EventRegistration Model - Student registrations for events (free/paid)
-import sql from '../config/db.js';
+import { pool } from '../config/db.js';
 
 class EventRegistration {
   /**
@@ -9,17 +9,70 @@ class EventRegistration {
    * @returns {Promise<Object>}
    */
   static async createFreeRegistration(eventId, studentId) {
-    const result = await sql`
-      INSERT INTO event_registrations (
-        event_id, student_id, registration_type, payment_status
-      )
-      VALUES (
-        ${eventId}, ${studentId}, 'FREE', 'NOT_REQUIRED'
-      )
-      RETURNING *
-    `;
+    await pool('BEGIN');
+    try {
+      // Check event capacity before registration
+      const event = await pool(
+        `SELECT max_capacity, current_registrations, waitlist_enabled
+         FROM events
+         WHERE id = $1 AND status IN ('APPROVED', 'ACTIVE')
+         LIMIT 1`,
+        [eventId]
+      );
 
-    return result[0];
+      if (event.length === 0) {
+        throw new Error('Event not found or not accepting registrations');
+      }
+
+      const { max_capacity, current_registrations, waitlist_enabled } = event[0];
+
+      // Check if event is full
+      if (max_capacity !== null && current_registrations >= max_capacity) {
+        if (!waitlist_enabled) {
+          throw new Error('Event is full and waitlist is not enabled');
+        }
+        // Register to waitlist
+        const result = await pool(
+          `INSERT INTO event_registrations (
+             event_id, student_id, registration_type, payment_status, registration_status
+           )
+           VALUES (
+             $1, $2, 'WAITLIST', 'NOT_REQUIRED', 'WAITLISTED'
+           )
+           RETURNING *`,
+          [eventId, studentId]
+        );
+        await pool('COMMIT');
+        return result[0];
+      }
+
+      const result = await pool(
+        `INSERT INTO event_registrations (
+           event_id, student_id, registration_type, payment_status
+         )
+         VALUES (
+           $1, $2, 'FREE', 'NOT_REQUIRED'
+         )
+         RETURNING *`,
+        [eventId, studentId]
+      );
+
+      // Increment current_registrations
+      await pool(
+        `UPDATE events
+         SET current_registrations = current_registrations + 1,
+             total_registrations = total_registrations + 1,
+             updated_at = NOW()
+         WHERE id = $1`,
+        [eventId]
+      );
+
+      await pool('COMMIT');
+      return result[0];
+    } catch (error) {
+      await pool('ROLLBACK');
+      throw error;
+    }
   }
 
   /**
@@ -32,7 +85,30 @@ class EventRegistration {
   static async createPaidRegistration(eventId, studentId, paymentData) {
     const { amount, currency, razorpay_order_id } = paymentData;
 
-    const result = await sql`
+    // Check event capacity before registration
+    const event = await pool`
+      SELECT max_capacity, current_registrations, waitlist_enabled
+      FROM events
+      WHERE id = ${eventId} AND status IN ('APPROVED', 'ACTIVE')
+      LIMIT 1
+    `;
+
+    if (event.length === 0) {
+      throw new Error('Event not found or not accepting registrations');
+    }
+
+    const { max_capacity, current_registrations, waitlist_enabled } = event[0];
+
+    // Check if event is full
+    if (max_capacity !== null && current_registrations >= max_capacity) {
+      if (!waitlist_enabled) {
+        throw new Error('Event is full and waitlist is not enabled');
+      }
+      // For paid events, we still create a pending payment registration even for waitlist
+      // Payment will be processed only if spot becomes available
+    }
+
+    const result = await pool`
       INSERT INTO event_registrations (
         event_id, student_id, registration_type, payment_status,
         razorpay_order_id, payment_amount, payment_currency
@@ -56,25 +132,47 @@ class EventRegistration {
   static async completePayment(registrationId, paymentData) {
     const { razorpay_payment_id, razorpay_signature } = paymentData;
 
-    const result = await sql`
-      UPDATE event_registrations 
-      SET 
-        payment_status = 'COMPLETED',
-        razorpay_payment_id = ${razorpay_payment_id},
-        razorpay_signature = ${razorpay_signature},
-        payment_completed_at = NOW(),
-        registration_status = 'CONFIRMED',
-        updated_at = NOW()
-      WHERE id = ${registrationId}
-        AND payment_status = 'PENDING'
-      RETURNING *
-    `;
+    await pool('BEGIN');
+    try {
+      const result = await pool(
+        `UPDATE event_registrations 
+         SET 
+           payment_status = 'COMPLETED',
+           razorpay_payment_id = $1,
+           razorpay_signature = $2,
+           payment_completed_at = NOW(),
+           registration_status = 'CONFIRMED',
+           updated_at = NOW()
+         WHERE id = $3
+           AND payment_status = 'PENDING'
+         RETURNING *`,
+        [razorpay_payment_id, razorpay_signature, registrationId]
+      );
 
-    if (result.length === 0) {
-      throw new Error('Registration not found or payment already completed');
+      if (result.length === 0) {
+        throw new Error('Registration not found or payment already completed');
+      }
+
+      // Increment current_registrations and revenue after successful payment
+      await pool(
+        `UPDATE events e
+         SET current_registrations = current_registrations + 1,
+             total_registrations = total_registrations + 1,
+             total_paid_registrations = total_paid_registrations + 1,
+             total_revenue = total_revenue + er.payment_amount,
+             updated_at = NOW()
+         FROM event_registrations er
+         WHERE e.id = er.event_id
+           AND er.id = $1`,
+        [registrationId]
+      );
+
+      await pool('COMMIT');
+      return result[0];
+    } catch (error) {
+      await pool('ROLLBACK');
+      throw error;
     }
-
-    return result[0];
   }
 
   /**
@@ -83,7 +181,7 @@ class EventRegistration {
    * @returns {Promise<Object>}
    */
   static async failPayment(registrationId) {
-    const result = await sql`
+    const result = await pool`
       UPDATE event_registrations 
       SET 
         payment_status = 'FAILED',
@@ -102,7 +200,7 @@ class EventRegistration {
    * @returns {Promise<Object|null>}
    */
   static async findById(registrationId) {
-    const result = await sql`
+    const result = await pool`
       SELECT 
         er.*,
         s.full_name as student_name,
@@ -123,12 +221,27 @@ class EventRegistration {
   }
 
   /**
+   * Get registration by student and event
+   * @param {string} eventId - Event UUID
+   * @param {string} studentId - Student UUID
+   * @returns {Promise<Object|null>}
+   */
+  static async getByStudentAndEvent(eventId, studentId) {
+    const result = await pool`
+      SELECT * FROM event_registrations
+      WHERE event_id = ${eventId} AND student_id = ${studentId}
+      LIMIT 1
+    `;
+    return result[0] || null;
+  }
+
+  /**
    * Find registration by Razorpay order ID
    * @param {string} orderId - Razorpay order ID
    * @returns {Promise<Object|null>}
    */
   static async findByOrderId(orderId) {
-    const result = await sql`
+    const result = await pool`
       SELECT * FROM event_registrations 
       WHERE razorpay_order_id = ${orderId}
       LIMIT 1
@@ -144,7 +257,7 @@ class EventRegistration {
    * @returns {Promise<Object|null>}
    */
   static async findByEventAndStudent(eventId, studentId) {
-    const result = await sql`
+    const result = await pool`
       SELECT * FROM event_registrations 
       WHERE event_id = ${eventId} 
         AND student_id = ${studentId}
@@ -163,33 +276,41 @@ class EventRegistration {
   static async getStudentRegistrations(studentId, filters = {}) {
     const { status, payment_status } = filters;
 
-    let conditions = [sql`er.student_id = ${studentId}`];
+    const conditions = ['er.student_id = $1'];
+    const params = [studentId];
 
     if (status) {
-      conditions.push(sql`er.registration_status = ${status}`);
+      conditions.push(`er.registration_status = $${params.length + 1}`);
+      params.push(status);
     }
 
     if (payment_status) {
-      conditions.push(sql`er.payment_status = ${payment_status}`);
+      conditions.push(`er.payment_status = $${params.length + 1}`);
+      params.push(payment_status);
     }
 
-    return await sql`
-      SELECT 
-        er.*,
-        e.event_name,
-        e.event_code,
-        e.event_type,
-        e.event_category,
-        e.venue,
-        e.start_date,
-        e.end_date,
-        e.status as event_status,
-        e.banner_image_url
-      FROM event_registrations er
-      LEFT JOIN events e ON er.event_id = e.id
-      WHERE ${sql.and(conditions)}
-      ORDER BY er.registered_at DESC
-    `;
+    const whereClause = conditions.join(' AND ');
+
+    const result = await pool(
+      `SELECT 
+         er.*,
+         e.event_name,
+         e.event_code,
+         e.event_type,
+         e.event_category,
+         e.venue,
+         e.start_date,
+         e.end_date,
+         e.status as event_status,
+         e.banner_image_url
+       FROM event_registrations er
+       LEFT JOIN events e ON er.event_id = e.id
+       WHERE ${whereClause}
+       ORDER BY er.registered_at DESC`,
+      params
+    );
+
+    return result;
   }
 
   /**
@@ -202,30 +323,41 @@ class EventRegistration {
     const { registration_status, payment_status, page = 1, limit = 50 } = filters;
     const offset = (page - 1) * limit;
 
-    let conditions = [sql`er.event_id = ${eventId}`];
+    const conditions = ['er.event_id = $1'];
+    const params = [eventId];
 
     if (registration_status) {
-      conditions.push(sql`er.registration_status = ${registration_status}`);
+      conditions.push(`er.registration_status = $${params.length + 1}`);
+      params.push(registration_status);
     }
 
     if (payment_status) {
-      conditions.push(sql`er.payment_status = ${payment_status}`);
+      conditions.push(`er.payment_status = $${params.length + 1}`);
+      params.push(payment_status);
     }
 
-    const result = await sql`
-      SELECT 
-        er.*,
-        s.full_name as student_name,
-        s.registration_no as student_registration_no,
-        s.email as student_email,
-        s.phone as student_phone,
-        COUNT(*) OVER() as total_count
-      FROM event_registrations er
-      LEFT JOIN students s ON er.student_id = s.id
-      WHERE ${sql.and(conditions)}
-      ORDER BY er.registered_at DESC
-      LIMIT ${limit} OFFSET ${offset}
-    `;
+    const whereClause = conditions.join(' AND ');
+    
+    // Add limit and offset
+    params.push(limit, offset);
+    const limitIdx = params.length - 1;
+    const offsetIdx = params.length;
+
+    const result = await pool(
+      `SELECT 
+         er.*,
+         s.full_name as student_name,
+         s.registration_no as student_registration_no,
+         s.email as student_email,
+         s.phone as student_phone,
+         COUNT(*) OVER() as total_count
+       FROM event_registrations er
+       LEFT JOIN students s ON er.student_id = s.id
+       WHERE ${whereClause}
+       ORDER BY er.registered_at DESC
+       LIMIT $${limitIdx} OFFSET $${offsetIdx}`,
+      params
+    );
 
     return {
       data: result,
@@ -244,7 +376,7 @@ class EventRegistration {
    * @returns {Promise<Object>}
    */
   static async recordCheckIn(registrationId) {
-    const result = await sql`
+    const result = await pool`
       UPDATE event_registrations 
       SET 
         has_checked_in = TRUE,
@@ -264,7 +396,7 @@ class EventRegistration {
    * @returns {Promise<Object>}
    */
   static async recordFeedback(registrationId) {
-    const result = await sql`
+    const result = await pool`
       UPDATE event_registrations 
       SET 
         has_submitted_feedback = TRUE,
@@ -284,7 +416,7 @@ class EventRegistration {
    * @returns {Promise<Object>}
    */
   static async updateTimeSpent(registrationId, minutes) {
-    const result = await sql`
+    const result = await pool`
       UPDATE event_registrations 
       SET 
         total_time_spent_minutes = total_time_spent_minutes + ${minutes},
@@ -302,7 +434,7 @@ class EventRegistration {
    * @returns {Promise<Object>}
    */
   static async cancel(registrationId) {
-    const result = await sql`
+    const result = await pool`
       UPDATE event_registrations 
       SET 
         registration_status = 'CANCELLED',
@@ -327,7 +459,7 @@ class EventRegistration {
    * @returns {Promise<Object>}
    */
   static async processRefund(registrationId, refundAmount, reason) {
-    const result = await sql`
+    const result = await pool`
       UPDATE event_registrations 
       SET 
         payment_status = 'REFUNDED',
@@ -355,7 +487,7 @@ class EventRegistration {
    * @returns {Promise<Object>}
    */
   static async getStats(eventId) {
-    const result = await sql`
+    const result = await pool`
       SELECT 
         COUNT(*) as total_registrations,
         COUNT(*) FILTER (WHERE registration_type = 'FREE') as free_registrations,
@@ -378,7 +510,7 @@ class EventRegistration {
    * @returns {Promise<boolean>}
    */
   static async delete(registrationId) {
-    await sql`
+    await pool`
       DELETE FROM event_registrations 
       WHERE id = ${registrationId}
     `;

@@ -4,6 +4,13 @@ import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 import { successResponse, errorResponse, validationErrorResponse } from '../helpers/response.js';
 import { setAuthCookie, clearAuthCookie } from '../helpers/cookie.js';
+import {
+  EventManagerModel,
+  EventModel,
+  EventVolunteerModel,
+  EventRegistrationModel
+} from '../models/index.js';
+import { logAuditEvent, AuditEventType } from '../utils/auditLogger.js';
 
 class EventManagerController {
   /**
@@ -159,12 +166,20 @@ class EventManagerController {
     try {
       const managerId = req.user.id;
 
-      // Check if manager is approved
+      // Check if manager is approved and active
       const manager = await EventManagerModel.findById(managerId);
       if (!manager.is_approved_by_admin) {
         return errorResponse(
           res,
           'Your account is not approved by admin. You cannot create events yet.',
+          403
+        );
+      }
+
+      if (!manager.is_active) {
+        return errorResponse(
+          res,
+          'Your account is deactivated. Contact admin to reactivate.',
           403
         );
       }
@@ -185,6 +200,82 @@ class EventManagerController {
         }
       }
 
+      // Validate event_code format (alphanumeric, hyphens, underscores only)
+      const eventCodeRegex = /^[A-Z0-9_-]+$/;
+      if (!eventCodeRegex.test(eventData.event_code)) {
+        return validationErrorResponse(res, [
+          { msg: 'Event code must contain only uppercase letters, numbers, hyphens, and underscores' }
+        ]);
+      }
+
+      // Validate event_type
+      if (!['FREE', 'PAID'].includes(eventData.event_type)) {
+        return validationErrorResponse(res, [
+          { msg: 'Event type must be either FREE or PAID' }
+        ]);
+      }
+
+      // Validate price for paid events
+      if (eventData.event_type === 'PAID') {
+        const price = parseFloat(eventData.price);
+        if (isNaN(price) || price <= 0) {
+          return validationErrorResponse(res, [
+            { msg: 'Paid events must have a price greater than 0' }
+          ]);
+        }
+        if (price > 100000) {
+          return validationErrorResponse(res, [
+            { msg: 'Price cannot exceed 100,000' }
+          ]);
+        }
+      }
+
+      // Validate dates
+      const startDate = new Date(eventData.start_date);
+      const endDate = new Date(eventData.end_date);
+      const regStartDate = new Date(eventData.registration_start_date);
+      const regEndDate = new Date(eventData.registration_end_date);
+
+      if (isNaN(startDate.getTime()) || isNaN(endDate.getTime()) || 
+          isNaN(regStartDate.getTime()) || isNaN(regEndDate.getTime())) {
+        return validationErrorResponse(res, [
+          { msg: 'Invalid date format' }
+        ]);
+      }
+
+      if (startDate >= endDate) {
+        return validationErrorResponse(res, [
+          { msg: 'Event start date must be before end date' }
+        ]);
+      }
+
+      if (regStartDate >= regEndDate) {
+        return validationErrorResponse(res, [
+          { msg: 'Registration start date must be before registration end date' }
+        ]);
+      }
+
+      if (regEndDate > startDate) {
+        return validationErrorResponse(res, [
+          { msg: 'Registration must close before event starts' }
+        ]);
+      }
+
+      // Validate max_capacity
+      if (eventData.max_capacity !== null && eventData.max_capacity !== undefined) {
+        const capacity = parseInt(eventData.max_capacity);
+        if (isNaN(capacity) || capacity < 1) {
+          return validationErrorResponse(res, [
+            { msg: 'Max capacity must be a positive number or null for unlimited' }
+          ]);
+        }
+        if (capacity > 100000) {
+          return validationErrorResponse(res, [
+            { msg: 'Max capacity cannot exceed 100,000' }
+          ]);
+        }
+      }
+
       // Check if event code is unique
       const existing = await EventModel.findByCode(eventData.event_code);
       if (existing) {
@@ -193,6 +284,23 @@ class EventManagerController {
 
       // Create event
       const event = await EventModel.create(eventData, managerId);
+
+      // Log audit event
+      await logAuditEvent({
+        event_type: AuditEventType.EVENT_CREATED,
+        user_id: managerId,
+        user_role: 'EVENT_MANAGER',
+        resource_type: 'EVENT',
+        resource_id: event.id,
+        metadata: {
+          event_name: event.event_name,
+          event_code: event.event_code,
+          event_type: event.event_type,
+          status: event.status
+        },
+        ip_address: req.ip,
+        user_agent: req.get('user-agent')
+      });
 
       return successResponse(
         res,
@@ -289,6 +397,21 @@ class EventManagerController {
 
       const updated = await EventModel.update(eventId, req.body);
 
+      // Log audit event
+      await logAuditEvent({
+        event_type: AuditEventType.EVENT_UPDATED,
+        user_id: managerId,
+        user_role: 'EVENT_MANAGER',
+        resource_type: 'EVENT',
+        resource_id: eventId,
+        metadata: {
+          updated_fields: Object.keys(req.body),
+          event_name: updated.event_name
+        },
+        ip_address: req.ip,
+        user_agent: req.get('user-agent')
+      });
+
       return successResponse(res, { event: updated }, 'Event updated successfully');
     } catch (error) {
       console.error('Update event error:', error);
@@ -316,6 +439,21 @@ class EventManagerController {
       }
 
       await EventModel.delete(eventId);
+
+      // Log audit event
+      await logAuditEvent({
+        event_type: AuditEventType.EVENT_DELETED,
+        user_id: managerId,
+        user_role: 'EVENT_MANAGER',
+        resource_type: 'EVENT',
+        resource_id: eventId,
+        metadata: {
+          event_name: event.event_name,
+          event_code: event.event_code
+        },
+        ip_address: req.ip,
+        user_agent: req.get('user-agent')
+      });
 
       return successResponse(res, null, 'Event cancelled successfully');
     } catch (error) {
@@ -355,6 +493,23 @@ class EventManagerController {
         { assigned_location, permissions }
       );
 
+      // Log audit event
+      await logAuditEvent({
+        event_type: AuditEventType.VOLUNTEER_ASSIGNED,
+        user_id: managerId,
+        user_role: 'EVENT_MANAGER',
+        resource_type: 'EVENT_VOLUNTEER',
+        resource_id: assignment.id,
+        metadata: {
+          event_id: eventId,
+          volunteer_id,
+          assigned_location,
+          permissions
+        },
+        ip_address: req.ip,
+        user_agent: req.get('user-agent')
+      });
+
       return successResponse(
         res,
         { assignment },
@@ -387,6 +542,21 @@ class EventManagerController {
       }
 
       await EventVolunteerModel.removeVolunteer(eventId, volunteerId);
+
+      // Log audit event
+      await logAuditEvent({
+        event_type: AuditEventType.VOLUNTEER_REMOVED,
+        user_id: managerId,
+        user_role: 'EVENT_MANAGER',
+        resource_type: 'EVENT_VOLUNTEER',
+        resource_id: volunteerId,
+        metadata: {
+          event_id: eventId,
+          volunteer_id: volunteerId
+        },
+        ip_address: req.ip,
+        user_agent: req.get('user-agent')
+      });
 
       return successResponse(res, null, 'Volunteer removed successfully');
     } catch (error) {
@@ -498,6 +668,135 @@ class EventManagerController {
       });
     } catch (error) {
       console.error('Get event analytics error:', error);
+      return errorResponse(res, error.message, 500);
+    }
+  }
+
+  /**
+   * Assign stall to event
+   * POST /api/event-managers/events/:eventId/stalls
+   */
+  static async assignStall(req, res) {
+    try {
+      const { eventId } = req.params;
+      const { stall_id } = req.body;
+      const managerId = req.user.id;
+
+      // Validation
+      if (!stall_id) {
+        return validationErrorResponse(res, [{ msg: 'Stall ID is required' }]);
+      }
+
+      // Check ownership
+      const event = await EventModel.findById(eventId);
+      if (!event) {
+        return errorResponse(res, 'Event not found', 404);
+      }
+
+      if (event.created_by_manager_id !== managerId) {
+        return errorResponse(res, 'Unauthorized access to this event', 403);
+      }
+
+      // Update stall's event_id
+      const stallQuery = `
+        UPDATE stalls 
+        SET event_id = $1, updated_at = NOW()
+        WHERE id = $2 AND is_active = true
+        RETURNING *
+      `;
+      const stalls = await query(stallQuery, [eventId, stall_id]);
+
+      if (stalls.length === 0) {
+        return errorResponse(res, 'Stall not found or already assigned', 404);
+      }
+
+      // Note: Audit logging removed - STALL_ASSIGNED not defined in AuditEventType
+      // Can be added later if needed
+
+      return successResponse(res, { stall: stalls[0] }, 'Stall assigned to event successfully', 201);
+    } catch (error) {
+      console.error('Assign stall error:', error);
+      return errorResponse(res, error.message, 500);
+    }
+  }
+
+  /**
+   * Remove stall from event
+   * DELETE /api/event-managers/events/:eventId/stalls/:stallId
+   */
+  static async removeStall(req, res) {
+    try {
+      const { eventId, stallId } = req.params;
+      const managerId = req.user.id;
+
+      // Check ownership
+      const event = await EventModel.findById(eventId);
+      if (!event) {
+        return errorResponse(res, 'Event not found', 404);
+      }
+
+      if (event.created_by_manager_id !== managerId) {
+        return errorResponse(res, 'Unauthorized access to this event', 403);
+      }
+
+      // Remove stall assignment (set event_id to NULL)
+      const removeQuery = `
+        UPDATE stalls 
+        SET event_id = NULL, updated_at = NOW()
+        WHERE id = $1 AND event_id = $2
+        RETURNING id
+      `;
+      const result = await query(removeQuery, [stallId, eventId]);
+
+      if (result.length === 0) {
+        return errorResponse(res, 'Stall not found or not assigned to this event', 404);
+      }
+
+      // Note: Audit logging removed - STALL_REMOVED not defined in AuditEventType
+      // Can be added later if needed
+
+      return successResponse(res, null, 'Stall removed from event successfully');
+    } catch (error) {
+      console.error('Remove stall error:', error);
+      return errorResponse(res, error.message, 500);
+    }
+  }
+
+  /**
+   * Get stalls assigned to event
+   * GET /api/event-managers/events/:eventId/stalls
+   */
+  static async getEventStalls(req, res) {
+    try {
+      const { eventId } = req.params;
+      const managerId = req.user.id;
+
+      // Check ownership
+      const event = await EventModel.findById(eventId);
+      if (!event) {
+        return errorResponse(res, 'Event not found', 404);
+      }
+
+      if (event.created_by_manager_id !== managerId) {
+        return errorResponse(res, 'Unauthorized access to this event', 403);
+      }
+
+      // Get stalls for this event
+      const stallsQuery = `
+        SELECT s.*, sc.school_name
+        FROM stalls s
+        LEFT JOIN schools sc ON s.school_id = sc.id
+        WHERE s.event_id = $1 AND s.is_active = true
+        ORDER BY s.stall_number ASC
+      `;
+      const stalls = await query(stallsQuery, [eventId]);
+
+      return successResponse(res, { 
+        stalls,
+        total: stalls.length
+      });
+    } catch (error) {
+      console.error('Get event stalls error:', error);
       return errorResponse(res, error.message, 500);
     }
   }

@@ -94,17 +94,17 @@ router.get('/events', adminController.getAllEvents);
 router.get('/events/:id', adminController.getEventDetails);
 
 /**
- * @route   POST /api/admin/events/:id/approve
+ * @route   PATCH /api/admin/events/:id/approve
  * @desc    Approve event
  * @access  Private (ADMIN)
  */
-router.post('/events/:id/approve', adminController.approveEvent);
+router.patch('/events/:id/approve', adminController.approveEvent);
 
 /**
- * @route   POST /api/admin/events/:id/reject
+ * @route   PATCH /api/admin/events/:id/reject
  * @desc    Reject event with reason
  * @access  Private (ADMIN)
  */
-router.post('/events/:id/reject', adminController.rejectEvent);
+router.patch('/events/:id/reject', adminController.rejectEvent);
 
 export default router;

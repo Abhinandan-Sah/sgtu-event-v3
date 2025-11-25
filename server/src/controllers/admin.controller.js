@@ -412,8 +412,22 @@ const createEventManager = async (req, res, next) => {
     }
 
     // Validate password strength
-    if (password.length < 6) {
-      return errorResponse(res, 'Password must be at least 6 characters long', 400);
+    if (password.length < 8) {
+      return errorResponse(res, 'Password must be at least 8 characters long', 400);
+    }
+
+    // Check password complexity
+    const hasUpperCase = /[A-Z]/.test(password);
+    const hasLowerCase = /[a-z]/.test(password);
+    const hasNumber = /[0-9]/.test(password);
+    const hasSpecialChar = /[!@#$%^&*()_+\-=\[\]{};':"\\|,.<>\/?]/.test(password);
+
+    if (!hasUpperCase || !hasLowerCase || !hasNumber || !hasSpecialChar) {
+      return errorResponse(
+        res,
+        'Password must contain at least one uppercase letter, one lowercase letter, one number, and one special character',
+        400
+      );
     }
 
     // Check if email already exists
@@ -663,13 +677,20 @@ const getPendingEvents = async (req, res, next) => {
     const result = await query(`
       SELECT 
         e.id,
-        e.name,
+        e.event_name,
+        e.event_code,
         e.description,
         e.event_type,
-        e.registration_fee,
+        e.price,
+        e.currency,
+        e.event_category,
+        e.venue,
         e.start_date,
         e.end_date,
-        e.max_participants,
+        e.registration_start_date,
+        e.registration_end_date,
+        e.max_capacity,
+        e.current_registrations,
         e.status,
         e.created_at,
         em.full_name as event_manager_name,
@@ -682,8 +703,8 @@ const getPendingEvents = async (req, res, next) => {
     `);
 
     return successResponse(res, {
-      pending_events: result.rows,
-      total_pending: result.rows.length
+      pending_events: result,
+      total_pending: result.length
     }, 'Pending events retrieved successfully');
   } catch (error) {
     next(error);
@@ -701,20 +722,26 @@ const getAllEvents = async (req, res, next) => {
     let queryText = `
       SELECT 
         e.id,
-        e.name,
+        e.event_name,
+        e.event_code,
         e.description,
         e.event_type,
-        e.registration_fee,
+        e.price,
+        e.currency,
+        e.event_category,
+        e.venue,
         e.start_date,
         e.end_date,
-        e.registration_start,
-        e.registration_end,
-        e.max_participants,
+        e.registration_start_date,
+        e.registration_end_date,
+        e.max_capacity,
+        e.current_registrations,
         e.status,
         e.total_registrations,
+        e.total_paid_registrations,
         e.total_revenue,
         e.created_at,
-        e.approved_at,
+        e.admin_approved_at,
         em.full_name as event_manager_name,
         em.organization,
         a.full_name as approved_by_name
@@ -750,8 +777,8 @@ const getAllEvents = async (req, res, next) => {
     const result = await query(queryText, params);
 
     return successResponse(res, {
-      events: result.rows,
-      total: result.rows.length
+      events: result,
+      total: result.length
     }, 'Events retrieved successfully');
   } catch (error) {
     next(error);
@@ -767,9 +794,19 @@ const approveEvent = async (req, res, next) => {
     const { id } = req.params;
     const adminId = req.user.id;
 
-    const event = await Event.approveByAdmin(id, adminId, query);
+    const event = await EventModel.approveByAdmin(id, adminId);
     if (!event) {
       return errorResponse(res, 'Event not found or already processed', 404);
+    }
+
+    // Check if it was already approved
+    if (event.already_approved) {
+      return res.status(409).json({
+        success: false,
+        message: 'Event was already approved',
+        data: { event },
+        timestamp: new Date().toISOString()
+      });
     }
 
     return successResponse(res, {
@@ -788,14 +825,25 @@ const rejectEvent = async (req, res, next) => {
   try {
     const { id } = req.params;
     const { rejection_reason } = req.body;
+    const adminId = req.user.id;
 
     if (!rejection_reason || rejection_reason.trim().length === 0) {
       return errorResponse(res, 'Rejection reason is required', 400);
     }
 
-    const event = await Event.rejectByAdmin(id, rejection_reason, query);
+    const event = await EventModel.rejectByAdmin(id, adminId, rejection_reason);
     if (!event) {
       return errorResponse(res, 'Event not found or already processed', 404);
+    }
+
+    // Check if it was already rejected
+    if (event.already_rejected) {
+      return res.status(409).json({
+        success: false,
+        message: 'Event was already rejected',
+        data: { event },
+        timestamp: new Date().toISOString()
+      });
     }
 
     return successResponse(res, {
@@ -834,23 +882,24 @@ const getEventDetails = async (req, res, next) => {
       GROUP BY e.id, em.full_name, em.email, em.phone, em.organization, a.full_name
     `, [id]);
 
-    if (eventResult.rows.length === 0) {
+    if (eventResult.length === 0) {
       return errorResponse(res, 'Event not found', 404);
     }
 
-    const event = eventResult.rows[0];
+    const event = eventResult[0];
 
     // Get recent registrations
     const recentRegistrations = await query(`
       SELECT 
         er.id,
         er.payment_status,
-        er.registration_fee_paid,
+        er.payment_amount,
+        er.payment_currency,
         er.registered_at,
-        s.enrollment_no,
+        s.registration_no,
         s.full_name as student_name,
         s.email as student_email,
-        sch.name as school_name
+        sch.school_name
       FROM event_registrations er
       INNER JOIN students s ON er.student_id = s.id
       INNER JOIN schools sch ON s.school_id = sch.id
@@ -861,7 +910,7 @@ const getEventDetails = async (req, res, next) => {
 
     return successResponse(res, {
       event,
-      recent_registrations: recentRegistrations.rows
+      recent_registrations: recentRegistrations
     }, 'Event details retrieved successfully');
   } catch (error) {
     next(error);

@@ -26,6 +26,8 @@ class PaymentService {
     try {
       const { amount, currency = 'INR', event_id, student_id, event_code } = orderData;
 
+      console.log('📋 [RAZORPAY] Creating order with:', { amount, currency, event_id, student_id, event_code });
+
       // Validate amount (minimum Rs. 1)
       if (amount < 1) {
         throw new Error('Invalid amount. Minimum payment is Rs. 1');
@@ -33,11 +35,15 @@ class PaymentService {
 
       const razorpay = this.getRazorpayInstance();
 
+      // Create receipt (max 40 chars for Razorpay)
+      const timestamp = Date.now();
+      const receipt = `${event_code}_${timestamp}`.substring(0, 40);
+
       // Create order
       const order = await razorpay.orders.create({
         amount: Math.round(amount * 100), // Convert to paise (smallest currency unit)
         currency: currency,
-        receipt: `EVENT_${event_code}_${student_id}_${Date.now()}`,
+        receipt: receipt,
         notes: {
           event_id,
           student_id,
@@ -57,7 +63,14 @@ class PaymentService {
       };
     } catch (error) {
       console.error('❌ [RAZORPAY] Order creation failed:', error);
-      throw new Error(`Payment order creation failed: ${error.message}`);
+      
+      // Handle different error types
+      const errorMessage = error.message || 
+                          error.error?.description || 
+                          error.description || 
+                          JSON.stringify(error);
+      
+      throw new Error(`Payment order creation failed: ${errorMessage}`);
     }
   }
 

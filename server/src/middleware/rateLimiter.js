@@ -91,10 +91,27 @@ export const feedbackLimiter = rateLimit({
   legacyHeaders: false
 });
 
+/**
+ * Event creation rate limiter
+ * 10 events per hour per event manager
+ */
+export const eventCreationLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000, // 1 hour
+  max: 10, // Limit each manager to 10 event creations per hour
+  message: {
+    success: false,
+    message: 'Event creation limit exceeded. You can create up to 10 events per hour.',
+    retryAfter: '1 hour'
+  },
+  standardHeaders: true,
+  legacyHeaders: false
+});
+
 export default {
   apiLimiter,
   authLimiter,
   qrLimiter,
   registrationLimiter,
-  feedbackLimiter
+  feedbackLimiter,
+  eventCreationLimiter
 };

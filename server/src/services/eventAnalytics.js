@@ -40,11 +40,11 @@ class EventAnalytics {
         GROUP BY e.id
       `, [eventId]);
 
-      if (statsResult.rows.length === 0) {
+      if (statsResult.length === 0) {
         return null;
       }
 
-      const stats = statsResult.rows[0];
+      const stats = statsResult[0];
 
       // Registration timeline (last 7 days)
       const timelineResult = await query(`
@@ -78,19 +78,20 @@ class EventAnalytics {
       // Check-in statistics (if event has started)
       const checkInResult = await query(`
         SELECT 
-          COUNT(DISTINCT CASE WHEN cio.direction = 'IN' THEN er.student_id END) as students_checked_in,
-          COUNT(DISTINCT CASE WHEN cio.direction = 'OUT' THEN er.student_id END) as students_checked_out,
-          AVG(EXTRACT(EPOCH FROM (cio.timestamp - e.start_date))) / 60 as avg_check_in_delay_minutes
+          COUNT(DISTINCT CASE WHEN cio.scan_type = 'CHECKIN' THEN er.student_id END) as students_checked_in,
+          COUNT(DISTINCT CASE WHEN cio.scan_type = 'CHECKOUT' THEN er.student_id END) as students_checked_out,
+          AVG(EXTRACT(EPOCH FROM (cio.scanned_at - e.start_date))) / 60 as avg_check_in_delay_minutes
         FROM event_registrations er
         INNER JOIN events e ON er.event_id = e.id
-        LEFT JOIN check_in_out cio ON er.student_id = cio.student_id 
-          AND cio.timestamp >= e.start_date 
-          AND cio.timestamp <= e.end_date
+        LEFT JOIN check_in_outs cio ON er.student_id = cio.student_id 
+          AND cio.event_id = $1
+          AND cio.scanned_at >= e.start_date 
+          AND cio.scanned_at <= e.end_date
         WHERE er.event_id = $1 AND er.payment_status = 'COMPLETED'
         GROUP BY e.start_date
       `, [eventId]);
 
-      const checkInStats = checkInResult.rows[0] || {
+      const checkInStats = checkInResult[0] || {
         students_checked_in: 0,
         students_checked_out: 0,
         avg_check_in_delay_minutes: null
@@ -126,8 +127,8 @@ class EventAnalytics {
           total_volunteers: parseInt(stats.total_volunteers)
         },
         attendance_stats: checkInStats,
-        registration_timeline: timelineResult.rows,
-        school_participation: schoolStatsResult.rows
+        registration_timeline: timelineResult,
+        school_participation: schoolStatsResult
       };
     } catch (error) {
       console.error('Error fetching event stats:', error);
@@ -156,7 +157,7 @@ class EventAnalytics {
         WHERE e.event_manager_id = $1 AND e.deleted_at IS NULL
       `, [eventManagerId]);
 
-      const overview = overviewResult.rows[0];
+      const overview = overviewResult[0];
 
       // Recent events with stats
       const recentEventsResult = await query(`
@@ -220,9 +221,9 @@ class EventAnalytics {
           total_registrations: parseInt(overview.total_registrations),
           total_revenue: parseFloat(overview.total_revenue) || 0
         },
-        recent_events: recentEventsResult.rows,
-        upcoming_events: upcomingEventsResult.rows,
-        revenue_trend: revenueTrendResult.rows
+        recent_events: recentEventsResult,
+        upcoming_events: upcomingEventsResult,
+        revenue_trend: revenueTrendResult
       };
     } catch (error) {
       console.error('Error fetching event manager dashboard:', error);
@@ -248,7 +249,7 @@ class EventAnalytics {
           (SELECT SUM(registration_fee_paid) FROM event_registrations WHERE payment_status = 'COMPLETED') as total_platform_revenue
       `);
 
-      const platformStats = platformStatsResult.rows[0];
+      const platformStats = platformStatsResult[0];
 
       // Top performing events
       const topEventsResult = await query(`
@@ -312,10 +313,10 @@ class EventAnalytics {
 
       return {
         platform_overview: platformStats,
-        top_events: topEventsResult.rows,
-        top_event_managers: topManagersResult.rows,
-        event_type_distribution: eventTypeDistResult.rows,
-        monthly_trends: monthlyTrendResult.rows
+        top_events: topEventsResult,
+        top_event_managers: topManagersResult,
+        event_type_distribution: eventTypeDistResult,
+        monthly_trends: monthlyTrendResult
       };
     } catch (error) {
       console.error('Error fetching admin analytics:', error);
@@ -359,7 +360,7 @@ class EventAnalytics {
 
       const result = await query(queryText, params);
 
-      return result.rows[0] || null;
+      return result[0] || null;
     } catch (error) {
       console.error('Error fetching volunteer analytics:', error);
       throw error;

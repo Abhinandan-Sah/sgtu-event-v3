@@ -1,5 +1,5 @@
 // EventManager Model - Manages events, assigns volunteers, requires admin approval
-import sql from '../config/db.js';
+import { pool } from '../config/db.js';
 import bcrypt from 'bcryptjs';
 
 class EventManager {
@@ -15,7 +15,7 @@ class EventManager {
     const salt = await bcrypt.genSalt(12);
     const password_hash = await bcrypt.hash(password, salt);
 
-    const result = await sql`
+    const result = await pool`
       INSERT INTO event_managers (
         email, password_hash, full_name, phone, organization
       )
@@ -38,7 +38,7 @@ class EventManager {
    * @returns {Promise<Object|null>}
    */
   static async findByEmail(email) {
-    const result = await sql`
+    const result = await pool`
       SELECT * FROM event_managers 
       WHERE email = ${email} 
       LIMIT 1
@@ -52,7 +52,7 @@ class EventManager {
    * @returns {Promise<Object|null>}
    */
   static async findById(managerId) {
-    const result = await sql`
+    const result = await pool`
       SELECT 
         em.*,
         a.full_name as approved_by_admin_name
@@ -94,28 +94,32 @@ class EventManager {
     if (updates.password) {
       const salt = await bcrypt.genSalt(12);
       updateFields.password_hash = await bcrypt.hash(updates.password, salt);
+      delete updateFields.password; // Remove plain password from updates
     }
 
     if (Object.keys(updateFields).length === 0) {
       throw new Error('No valid fields to update');
     }
 
+    // Build SET clause with proper parameter placeholders
     const setClause = Object.keys(updateFields)
       .map((key, idx) => `${key} = $${idx + 2}`)
       .join(', ');
 
     const values = [managerId, ...Object.values(updateFields)];
 
-    const result = await sql`
-      UPDATE event_managers 
-      SET ${sql(updateFields)}, updated_at = NOW()
-      WHERE id = ${managerId}
-      RETURNING 
-        id, email, full_name, phone, organization, role,
-        is_approved_by_admin, is_active,
-        total_events_created, total_events_completed,
-        created_at, updated_at
-    `;
+    // Use pool with parameterized query (not template literal)
+    const result = await pool(
+      `UPDATE event_managers 
+       SET ${setClause}, updated_at = NOW()
+       WHERE id = $1
+       RETURNING 
+         id, email, full_name, phone, organization, role,
+         is_approved_by_admin, is_active,
+         total_events_created, total_events_completed,
+         created_at, updated_at`,
+      values
+    );
 
     return result[0];
   }
@@ -129,7 +133,7 @@ class EventManager {
     const { is_active, page = 1, limit = 50 } = filters;
     const offset = (page - 1) * limit;
 
-    let query = sql`
+    let query = pool`
       SELECT 
         em.*,
         a.full_name as approved_by_admin_name,
@@ -140,10 +144,10 @@ class EventManager {
     `;
 
     if (is_active !== undefined) {
-      query = sql`${query} AND em.is_active = ${is_active}`;
+      query = pool`${query} AND em.is_active = ${is_active}`;
     }
 
-    query = sql`
+    query = pool`
       ${query}
       ORDER BY em.created_at DESC
       LIMIT ${limit} OFFSET ${offset}
@@ -168,7 +172,7 @@ class EventManager {
    * @returns {Promise<Object>}
    */
   static async deactivate(managerId) {
-    const result = await sql`
+    const result = await pool`
       UPDATE event_managers 
       SET is_active = FALSE, updated_at = NOW()
       WHERE id = ${managerId}
@@ -184,7 +188,7 @@ class EventManager {
    * @returns {Promise<Object>}
    */
   static async reactivate(managerId) {
-    const result = await sql`
+    const result = await pool`
       UPDATE event_managers 
       SET is_active = TRUE, updated_at = NOW()
       WHERE id = ${managerId}
@@ -200,7 +204,7 @@ class EventManager {
    * @returns {Promise<Object>}
    */
   static async getStats(managerId) {
-    const result = await sql`
+    const result = await pool`
       SELECT 
         em.id,
         em.full_name,
@@ -229,7 +233,7 @@ class EventManager {
    */
   static async delete(managerId) {
     // Check if manager has active events
-    const activeEvents = await sql`
+    const activeEvents = await pool`
       SELECT COUNT(*) as count 
       FROM events 
       WHERE created_by_manager_id = ${managerId}
